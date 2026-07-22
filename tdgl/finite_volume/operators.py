@@ -240,6 +240,10 @@ class MeshOperators:
         use_cupy: Use CuPy for linear algebra.
         fixed_sites: The indices of any sites for which the value of :math:`\\psi`
             and :math:`\\mu` are fixed as boundary conditions.
+        
+    Attributes:
+        laplacian_x: Directional Laplacian matrix for the x-direction.
+        laplacian_y: Directional Laplacian matrix for the y-direction.
     """
 
     def __init__(
@@ -266,10 +270,17 @@ class MeshOperators:
         self.mu_laplacian_lu: Union[Callable, None] = None
         self.psi_gradient: Union[sp.spmatrix, None] = None
         self.psi_laplacian: Union[sp.spmatrix, None] = None
+        self.laplacian_x: Union[sp.spmatrix, None] = None
+        self.laplacian_y: Union[sp.spmatrix, None] = None
         self.link_exponents: Union[np.ndarray, None] = None
         # Compute these quantities just once, as they never change.
         self.gradient_weights = 1 / edge_mesh.edge_lengths
         self.laplacian_weights = edge_mesh.dual_edge_lengths / edge_mesh.edge_lengths
+        
+        u_x = edge_mesh.normalized_directions[:, 0]
+        u_y = edge_mesh.normalized_directions[:, 1]
+        self.laplacian_weights_x = self.laplacian_weights * (u_x ** 2)
+        self.laplacian_weights_y = self.laplacian_weights * (u_y ** 2)
         self.gradient_link_rows = np.arange(len(edge_mesh.edges), dtype=int)
         self.gradient_link_cols = edge_mesh.edges[:, 1]
         self.laplacian_link_rows = np.concatenate(
@@ -337,11 +348,29 @@ class MeshOperators:
                 free_rows=free_rows,
                 weights=self.laplacian_weights,
             )
+            self.laplacian_x, _ = build_laplacian(
+                mesh,
+                link_exponents=link_exponents,
+                fixed_sites=fixed_sites,
+                free_rows=free_rows,
+                weights=self.laplacian_weights_x,
+            )
+            self.laplacian_y, _ = build_laplacian(
+                mesh,
+                link_exponents=link_exponents,
+                fixed_sites=fixed_sites,
+                free_rows=free_rows,
+                weights=self.laplacian_weights_y,
+            )
             if self.use_cupy:
                 self.psi_gradient = csr_matrix(self.psi_gradient)
                 self.psi_laplacian = csr_matrix(self.psi_laplacian)
+                self.laplacian_x = csr_matrix(self.laplacian_x)
+                self.laplacian_y = csr_matrix(self.laplacian_y)
                 self.gradient_weights = cupy.asarray(self.gradient_weights)
                 self.laplacian_weights = cupy.asarray(self.laplacian_weights)
+                self.laplacian_weights_x = cupy.asarray(self.laplacian_weights_x)
+                self.laplacian_weights_y = cupy.asarray(self.laplacian_weights_y)
             return
         # Just update the link variables
         edges = self.edges
@@ -370,17 +399,35 @@ class MeshOperators:
                     weights * link_variables.conjugate() / areas[edges[:, 1]],
                 ]
             )
+            weights_x = self.laplacian_weights_x
+            values_x = xp.concatenate(
+                [
+                    weights_x * link_variables / areas[edges[:, 0]],
+                    weights_x * link_variables.conjugate() / areas[edges[:, 1]],
+                ]
+            )
+            weights_y = self.laplacian_weights_y
+            values_y = xp.concatenate(
+                [
+                    weights_y * link_variables / areas[edges[:, 0]],
+                    weights_y * link_variables.conjugate() / areas[edges[:, 1]],
+                ]
+            )
             # Only update rows that are not fixed by boundary conditions
             if self.fix_psi:
                 free_rows = self.laplacian_free_rows[: len(self.laplacian_link_rows)]
                 rows = self.laplacian_link_rows[free_rows]
                 cols = self.laplacian_link_cols[free_rows]
                 values = values[free_rows]
+                values_x = values_x[free_rows]
+                values_y = values_y[free_rows]
             else:
                 rows = self.laplacian_link_rows
                 cols = self.laplacian_link_cols
             # self.psi_laplacian[rows, cols] = values
             _spmatrix_set_many(self.psi_laplacian, rows, cols, values)
+            _spmatrix_set_many(self.laplacian_x, rows, cols, values_x)
+            _spmatrix_set_many(self.laplacian_y, rows, cols, values_y)
 
     def get_supercurrent(self, psi: np.ndarray):
         """Compute the supercurrent on the edges.

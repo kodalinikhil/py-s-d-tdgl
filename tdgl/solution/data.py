@@ -73,7 +73,8 @@ class TDGLData:
         step: The solver iteration.
         epsilon: The disorder parameter. :math:`\\epsilon<1` weakens the
             order parameter.
-        psi: The complex order parameter at each site in the mesh.
+        psi_d: The complex d-wave order parameter at each site in the mesh.
+        psi_s: The complex s-wave order parameter at each site in the mesh.
         mu: The scalar potential at each site in the mesh.
         applied_vector_potential: The applied vector potential at each edge in the mesh.
         induced_vector_potential: The induced vector potential at each edge in the mesh.
@@ -84,13 +85,19 @@ class TDGLData:
 
     step: int
     epsilon: np.ndarray
-    psi: np.ndarray
+    psi_d: np.ndarray
+    psi_s: np.ndarray
     mu: np.ndarray
     applied_vector_potential: np.ndarray
     induced_vector_potential: np.ndarray
     supercurrent: np.ndarray
     normal_current: np.ndarray
     state: Dict[str, Any]
+
+    @property
+    def psi(self) -> np.ndarray:
+        """Alias for the s-wave order parameter (psi_s) for backwards compatibility."""
+        return self.psi_s
 
     @staticmethod
     def from_hdf5(h5file: Union[h5py.File, h5py.Group], step: int) -> "TDGLData":
@@ -110,6 +117,27 @@ class TDGLData:
                 return int(step)
             if key in ["state"]:
                 return load_state_data(h5file, step)
+            
+            # Backwards compatibility for psi -> psi_s
+            if key == "psi_s":
+                if "psi_s" in h5file["data"][step]:
+                    dset = h5file["data"][step]["psi_s"]
+                elif "psi" in h5file["data"][step]:
+                    dset = h5file["data"][step]["psi"]
+                else:
+                    return default
+                dset.refresh()
+                return np.array(dset)
+            
+            # Default to zero for psi_d if not found
+            if key == "psi_d":
+                if "psi_d" in h5file["data"][step]:
+                    dset = h5file["data"][step]["psi_d"]
+                    dset.refresh()
+                    return np.array(dset)
+                else:
+                    return np.zeros_like(get("psi_s"))
+            
             if key in h5file:
                 dset = h5file[key]
                 dset.refresh()
@@ -495,7 +523,10 @@ class DynamicsData:
                 grp = h5file[f"data/{i}"]
                 times[i] = float(grp.attrs["time"])
                 mus[:, i] = np.array(grp["mu"])[probe_point_indices]
-                thetas[:, i] = np.angle(np.array(grp["psi"]))[probe_point_indices]
+                if "psi_d" in grp:
+                    thetas[:, i] = np.angle(np.array(grp["psi_d"]))[probe_point_indices]
+                else:
+                    thetas[:, i] = np.angle(np.array(grp["psi"]))[probe_point_indices]
 
         return DynamicsData(dt=np.diff(times), mu=mus, theta=thetas)
 

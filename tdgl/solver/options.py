@@ -61,6 +61,9 @@ class SolverOptions:
             step.
         screening_step_size: Step size :math:`\\alpha` for Polyak's method.
         screening_step_drag: Drag parameter :math:`\\beta` for Polyak's method.
+        simulate_d_wave: Whether to simulate the d-wave order parameter. If False,
+            the d-wave component is kept exactly at zero, effectively resulting in a 
+            standard single-band s-wave simulation.
     """
 
     solve_time: float
@@ -87,6 +90,7 @@ class SolverOptions:
     screening_tolerance: float = 1e-3
     screening_step_size: float = 0.1
     screening_step_drag: float = 0.5
+    simulate_d_wave: bool = True
 
     def validate(self) -> None:
         if self.dt_init > self.dt_max:

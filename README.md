@@ -1,98 +1,34 @@
-# pyTDGL
-
-![pyTDGL Logo](docs/images/logo-transparent-small.png)
-
-Time-dependent Ginzburg-Landau in Python
-
-![PyPI](https://img.shields.io/pypi/v/tdgl)
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/loganbvh/py-tdgl/lint-and-test.yml?branch=main)
-[![Documentation Status](https://readthedocs.org/projects/py-tdgl/badge/?version=latest)](https://py-tdgl.readthedocs.io/en/latest/?badge=latest)
-[![codecov](https://codecov.io/gh/loganbvh/py-tdgl/branch/main/graph/badge.svg?token=VXdxJKP6Ag)](https://codecov.io/gh/loganbvh/py-tdgl)
-![GitHub](https://img.shields.io/github/license/loganbvh/py-tdgl)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7613568.svg)](https://doi.org/10.5281/zenodo.7613568)
-
-
+# py(s+d)TDGL
 
 ## Motivation
-`pyTDGL` solves a 2D generalized time-dependent Ginzburg-Landau (TDGL) equation, enabling simulations of vortex and phase dynamics in thin film superconducting devices.
+`py(s+d)TDGL` solves a 2D generalized time-dependent Ginzburg-Landau (TDGL) equation, enabling simulations of vortex and phase dynamics in thin film superconducting devices. It extends the standard 2D TDGL equation by incorporating additional degrees of freedom associated with multiple superconducting order parameters, such as the d-wave and s-wave order parameters.
 
-## Learn `pyTDGL`
+## Install `py(s+d)TDGL`
 
-The documentation for `pyTDGL` can be found at [py-tdgl.readthedocs.io](https://py-tdgl.readthedocs.io/en/latest/).
+At the moment, to install py(s+d)TDGL, you can clone the repository and install it in editable mode.
 
-## Try `pyTDGL`
+## About `py(s+d)TDGL`
 
-Click the badge below to try `pyTDGL` interactively online via [Google Colab](https://colab.research.google.com/):
+N.B. There is still much testing to be done; this project is in its early stages.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/loganbvh/py-tdgl/blob/main/docs/notebooks/quickstart.ipynb)
-
-## Install `pyTDGL`
-
-`pyTDGL` requires `python` `3.9`, `3.10`, `3.11`, `3.12`, `3.13`, or `3.14`. We recommend installing `pyTDGL` in a [`conda` environment](https://conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html), e.g.
-
-```bash
-conda create --name tdgl python="3.12"
-conda activate tdgl
-```
-
-### Install via `pip`
-
-From  [PyPI](https://pypi.org/project/tdgl/), the Python Package index:
-    
-```bash
-pip install tdgl
-```
-
-From this [GitHub repository](https://github.com/loganbvh/py-tdgl/):
-
-```bash
-pip install git+https://github.com/loganbvh/py-tdgl.git
-```
-
-Editable installation:
-
-```bash
-git clone https://github.com/loganbvh/py-tdgl.git
-cd py-tdgl
-pip install -e ".[dev,docs]"
-```
-## About `pyTDGL`
+py(s+d)TDGL is based on the following paper:
+Gonçalves, W. C., Sardella, E., Becerra, V. F., Milošević, M. V., & Peeters, F. M. (2014). Numerical solution of the time dependent Ginzburg-Landau equations for mixed (d + s)-wave superconductors. Journal of Mathematical Physics, 55, 041501. https://doi.org/10.1063/1.4870874
+Unlike it, we do not set the electric potential to zero and we solve the Poisson equation, as that was how base pyTDGL was implemented.
+Now, there are two complex order parameters, and we can model unconventional superconductors, such as high-Tc cuprates, iron pnictides, and heavy-fermion superconductors. 
+Like pyTDGL, this is accurate at temperatures near Tc and for superconductors in the dirty limit. A new issue that arises for the phenomenological description of s+d order parameters is that if relaxation times of the d-wave and s-wave components are vastly different, it may not capture some of the microscopic physics. See: 
+Zhu, J.-X., Kim, W., Ting, C. S., & Hu, C.-R. (1999). Time-dependent Ginzburg-Landau equations for mixed d- and s-wave superconductors. Physical Review B, 59(17), 11527–11534. https://doi.org/10.1103/PhysRevB.59.11527
+As such, this program is most effective if all we care about is the static end state (equilibrium) and not the dynamics.
+To revert to the single-band s-wave case, set simulate_d_wave=False in the solver parameters.
 
 ### Authors
 
-- Primary author and maintainer: [@loganbvh](https://github.com/loganbvh/).
+- Nikhil Kodali
 
-### Citing `pyTDGL`
+### Citing `py(s+d)TDGL`
 
-`pyTDGL` is described in the following paper:
-
->*pyTDGL: Time-dependent Ginzburg-Landau in Python*, Computer Physics Communications **291**, 108799 (2023), DOI: [10.1016/j.cpc.2023.108799](https://doi.org/10.1016/j.cpc.2023.108799).
-
-If you use `pyTDGL` in your research, please cite the paper linked above.
-
-    % BibTeX citation
-    @article{
-        Bishop-Van_Horn2023-wr,
-        title    = "{pyTDGL}: Time-dependent {Ginzburg-Landau} in Python",
-        author   = "Bishop-Van Horn, Logan",
-        journal  = "Comput. Phys. Commun.",
-        volume   =  291,
-        pages    = "108799",
-        month    =  may,
-        year     =  2023,
-        url      = "http://dx.doi.org/10.1016/j.cpc.2023.108799",
-        issn     = "0010-4655",
-        doi      = "10.1016/j.cpc.2023.108799"
-    }
-
+Cite the github repository.
 
 ### Acknowledgments
 
-Parts of this package have been adapted from [`SuperDetectorPy`](https://github.com/afsa/super-detector-py), a GitHub repo authored by [Mattias Jönsson](https://github.com/afsa). Both `SuperDetectorPy` and `py-tdgl` are released under the open-source MIT License. If you use either package in an academic publication or similar, please consider citing the following in addition to the `pyTDGL` paper:
-
-- Mattias Jönsson, Theory for superconducting few-photon detectors (Doctoral dissertation), KTH Royal Institute of Technology (2022) ([Link](http://urn.kb.se/resolve?urn=urn:nbn:se:kth:diva-312132))
-- Mattias Jönsson, Robert Vedin, Samuel Gyger, James A. Sutton, Stephan Steinhauer, Val Zwiller, Mats Wallin, Jack Lidmar, Current crowding in nanoscale superconductors within the Ginzburg-Landau model, Phys. Rev. Applied 17, 064046 (2022) ([Link](https://journals.aps.org/prapplied/abstract/10.1103/PhysRevApplied.17.064046))
-
-The user interface is adapted from [`SuperScreen`](https://github.com/loganbvh/superscreen).
+This is forked off of Logan Bishop-Van Horn's pyTDGL repository: https://github.com/loganbvh/py-tdgl. His work, and the work of all who have contributed directly or indirectly to pyTDGL is acknowledged here.
 

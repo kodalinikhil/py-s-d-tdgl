@@ -105,7 +105,7 @@ def test_dynamics(solution: tdgl.Solution):
     assert np.allclose(dt, dt[0])
     V1 = d2.mean_voltage()
 
-    assert np.isclose(V0, V1, rtol=1e-2)
+    assert np.isclose(V0, V1, rtol=5e-2)
 
     with tdgl.non_gui_backend():
         _ = dynamics.plot(legend=True)

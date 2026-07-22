@@ -18,6 +18,15 @@ class Layer:
             scattering. :math:`\\gamma` is proportional to the inelastic scattering
             time and the size of the superconducting gap.
         z0: Vertical location of the film.
+        gamma_d: Inelastic scattering time scale for the d-wave component.
+        gamma_s: Inelastic scattering time scale for the s-wave component.
+        alpha_d: Linear free energy coefficient for the d-wave component.
+        alpha_s: Linear free energy coefficient for the s-wave component.
+        beta_d: Nonlinear free energy coefficient for the d-wave component.
+        beta_s: Nonlinear free energy coefficient for the s-wave component.
+        gamma_1: Coupling constant for the $|\\psi_d|^2 |\\psi_s|^2$ mixed term.
+        gamma_2: Coupling constant for the $\\psi_d^2 \\psi_s^{*2} + c.c.$ mixed term.
+        epsilon: Mixed spatial gradient coupling coefficient.
     """
 
     def __init__(
@@ -30,6 +39,15 @@ class Layer:
         u: float = 5.79,
         gamma: float = 10.0,
         z0: float = 0,
+        gamma_d: float = 1.0,
+        gamma_s: float = 1.0,
+        alpha_d: float = 1.0,
+        alpha_s: float = 1.0,
+        beta_d: float = 1.0,
+        beta_s: float = 1.0,
+        gamma_1: float = 0.0,
+        gamma_2: float = 0.0,
+        epsilon: float = 0.0,
     ):
         self.london_lambda = london_lambda
         self.coherence_length = coherence_length
@@ -38,6 +56,15 @@ class Layer:
         self.u = u
         self.gamma = gamma
         self.z0 = z0
+        self.gamma_d = gamma_d
+        self.gamma_s = gamma_s
+        self.alpha_d = alpha_d
+        self.alpha_s = alpha_s
+        self.beta_d = beta_d
+        self.beta_s = beta_s
+        self.gamma_1 = gamma_1
+        self.gamma_2 = gamma_2
+        self.epsilon = epsilon
 
     @property
     def Lambda(self) -> float:
@@ -54,6 +81,15 @@ class Layer:
             u=self.u,
             gamma=self.gamma,
             z0=self.z0,
+            gamma_d=self.gamma_d,
+            gamma_s=self.gamma_s,
+            alpha_d=self.alpha_d,
+            alpha_s=self.alpha_s,
+            beta_d=self.beta_d,
+            beta_s=self.beta_s,
+            gamma_1=self.gamma_1,
+            gamma_2=self.gamma_2,
+            epsilon=self.epsilon,
         )
 
     def to_hdf5(self, h5_group: h5py.Group) -> None:
@@ -68,6 +104,15 @@ class Layer:
         h5_group.attrs["u"] = self.u
         h5_group.attrs["gamma"] = self.gamma
         h5_group.attrs["z0"] = self.z0
+        h5_group.attrs["gamma_d"] = self.gamma_d
+        h5_group.attrs["gamma_s"] = self.gamma_s
+        h5_group.attrs["alpha_d"] = self.alpha_d
+        h5_group.attrs["alpha_s"] = self.alpha_s
+        h5_group.attrs["beta_d"] = self.beta_d
+        h5_group.attrs["beta_s"] = self.beta_s
+        h5_group.attrs["gamma_1"] = self.gamma_1
+        h5_group.attrs["gamma_2"] = self.gamma_2
+        h5_group.attrs["epsilon"] = self.epsilon
         if self.conductivity is not None:
             h5_group.attrs["conductivity"] = self.conductivity
 
@@ -92,9 +137,18 @@ class Layer:
             coherence_length=get("coherence_length"),
             thickness=get("thickness"),
             conductivity=get("conductivity"),
-            u=get("u"),
-            gamma=get("gamma"),
-            z0=get("z0"),
+            u=get("u", 5.79),
+            gamma=get("gamma", 10.0),
+            z0=get("z0", 0.0),
+            gamma_d=get("gamma_d", 1.0),
+            gamma_s=get("gamma_s", 1.0),
+            alpha_d=get("alpha_d", 1.0),
+            alpha_s=get("alpha_s", 1.0),
+            beta_d=get("beta_d", 1.0),
+            beta_s=get("beta_s", 1.0),
+            gamma_1=get("gamma_1", 0.0),
+            gamma_2=get("gamma_2", 0.0),
+            epsilon=get("epsilon", 0.0),
         )
 
     def __eq__(self, other):
@@ -112,6 +166,15 @@ class Layer:
             and self.u == other.u
             and self.gamma == other.gamma
             and self.z0 == other.z0
+            and self.gamma_d == other.gamma_d
+            and self.gamma_s == other.gamma_s
+            and self.alpha_d == other.alpha_d
+            and self.alpha_s == other.alpha_s
+            and self.beta_d == other.beta_d
+            and self.beta_s == other.beta_s
+            and self.gamma_1 == other.gamma_1
+            and self.gamma_2 == other.gamma_2
+            and self.epsilon == other.epsilon
         )
 
     def __repr__(self) -> str:
@@ -123,6 +186,15 @@ class Layer:
             f"conductivity={self.conductivity}, "
             f"u={self.u}, "
             f"gamma={self.gamma}, "
-            f"z0={self.z0}"
+            f"z0={self.z0}, "
+            f"gamma_d={self.gamma_d}, "
+            f"gamma_s={self.gamma_s}, "
+            f"alpha_d={self.alpha_d}, "
+            f"alpha_s={self.alpha_s}, "
+            f"beta_d={self.beta_d}, "
+            f"beta_s={self.beta_s}, "
+            f"gamma_1={self.gamma_1}, "
+            f"gamma_2={self.gamma_2}, "
+            f"epsilon={self.epsilon}"
             f")"
         )

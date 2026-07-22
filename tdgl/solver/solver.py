@@ -76,7 +76,8 @@ class SolverResult(NamedTuple):
     """
 
     dt: float
-    psi: np.ndarray
+    psi_d: np.ndarray
+    psi_s: np.ndarray
     mu: np.ndarray
     supercurrent: np.ndarray
     normal_current: np.ndarray
@@ -151,6 +152,15 @@ class TDGLSolver:
         xi = device.coherence_length.magnitude
         self.u = device.layer.u
         self.gamma = device.layer.gamma
+        self.gamma_d = device.layer.gamma_d
+        self.gamma_s = device.layer.gamma_s
+        self.alpha_d = device.layer.alpha_d
+        self.alpha_s = device.layer.alpha_s
+        self.beta_d = device.layer.beta_d
+        self.beta_s = device.layer.beta_s
+        self.gamma_1 = device.layer.gamma_1
+        self.gamma_2 = device.layer.gamma_2
+        self.mixed_epsilon = device.layer.epsilon
         K0 = device.K0
         A0 = device.A0
         Bc2 = device.Bc2
@@ -282,9 +292,20 @@ class TDGLSolver:
             assert pypardiso is not None
 
         # Initialize the order parameter and electric potential
-        psi_init = np.ones(len(mesh.sites), dtype=np.complex128)
-        if terminal_psi is not None:
-            psi_init[normal_boundary_index] = terminal_psi
+        if options.simulate_d_wave:
+            psi_d_init = np.ones(len(mesh.sites), dtype=np.complex128)
+            psi_s_init = np.zeros(len(mesh.sites), dtype=np.complex128) + 1e-4 * (
+                np.random.rand(len(mesh.sites)) + 1j * np.random.rand(len(mesh.sites))
+            )
+            if terminal_psi is not None:
+                psi_d_init[normal_boundary_index] = terminal_psi
+                psi_s_init[normal_boundary_index] = 0.0
+        else:
+            psi_d_init = np.zeros(len(mesh.sites), dtype=np.complex128)
+            psi_s_init = np.ones(len(mesh.sites), dtype=np.complex128)
+            if terminal_psi is not None:
+                psi_d_init[normal_boundary_index] = 0.0
+                psi_s_init[normal_boundary_index] = terminal_psi
         mu_init = np.zeros(len(mesh.sites))
         mu_boundary = np.zeros_like(mesh.edge_mesh.boundary_edge_indices, dtype=float)
 
@@ -294,7 +315,8 @@ class TDGLSolver:
             normalized_directions = cupy.asarray(normalized_directions)
             current_A_applied = cupy.asarray(current_A_applied)
 
-        self.psi_init = psi_init
+        self.psi_d_init = psi_d_init
+        self.psi_s_init = psi_s_init
         self.mu_init = mu_init
         self.epsilon = epsilon
         self.mu_boundary = mu_boundary
@@ -380,8 +402,8 @@ class TDGLSolver:
             epsilon = cupy.asarray(epsilon)
         return epsilon
 
-    @staticmethod
     def solve_for_psi_squared(
+        self,
         *,
         psi: np.ndarray,
         abs_sq_psi: np.ndarray,
@@ -441,59 +463,124 @@ class TDGLSolver:
     def adaptive_euler_step(
         self,
         step: int,
-        psi: np.ndarray,
-        abs_sq_psi: np.ndarray,
+        psi_d: np.ndarray,
+        psi_s: np.ndarray,
+        abs_sq_psi_d: np.ndarray,
+        abs_sq_psi_s: np.ndarray,
         mu: np.ndarray,
-        epsilon: np.ndarray,
+        epsilon_disorder: np.ndarray,
         dt: float,
-    ) -> Tuple[np.ndarray, np.ndarray, float]:
-        """Updates the order parameter and time step in an adaptive Euler step.
-
-        Args:
-            step: The solve step index, :math:`n`
-            psi: The current value of the order parameter, :math:`\\psi^n`
-            abs_sq_psi: The current value of the superfluid density, :math:`|\\psi^n|^2`
-            mu: The current value of the electric potential, :math:`\\mu^n`
-            epsilon: The disorder parameter :math:`\\epsilon^n`
-            dt: The tentative time step, which will be updated
-
-        Returns:
-            :math:`\\psi^{n+1}`, :math:`|\\psi^{n+1}|^2`, and :math:`\\Delta t^{n}`.
-        """
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
         options = self.options
-        kwargs = dict(
-            psi=psi,
-            abs_sq_psi=abs_sq_psi,
-            mu=mu,
-            epsilon=epsilon,
-            gamma=self.gamma,
-            u=self.u,
-            dt=dt,
-            psi_laplacian=self.operators.psi_laplacian,
+        if isinstance(psi_d, np.ndarray):
+            xp = np
+        else:
+            xp = cupy
+
+        if not options.simulate_d_wave:
+            # Fall back to original pyTDGL solver for single band
+            kwargs = dict(
+                psi=psi_s,
+                abs_sq_psi=abs_sq_psi_s,
+                mu=mu,
+                epsilon=epsilon_disorder,
+                gamma=self.gamma,
+                u=self.u,
+                dt=dt,
+                psi_laplacian=self.operators.psi_laplacian,
+            )
+            result = self.solve_for_psi_squared(**kwargs)
+            for retries in itertools.count():
+                if result is not None:
+                    break  # First evaluation of |psi|^2 was successful.
+                if not options.adaptive or retries > options.max_solve_retries:
+                    raise RuntimeError(
+                        f"Solver failed to converge in {options.max_solve_retries}"
+                        f" retries at step {step} with dt = {dt:.2e}."
+                        f" Try using a smaller dt_init or dt_max."
+                    )
+                kwargs["dt"] = dt = dt * options.adaptive_time_step_multiplier
+                result = self.solve_for_psi_squared(**kwargs)
+            
+            new_psi_s, new_sq_s = result
+            new_psi_d = psi_d
+            new_sq_d = abs_sq_psi_d
+            return new_psi_d, new_psi_s, new_sq_d, new_sq_s, dt
+
+        U = xp.exp(-1j * mu * dt)
+        
+        # Calculate Laplacians
+        lap_d = self.operators.psi_laplacian @ psi_d
+        lap_s = self.operators.psi_laplacian @ psi_s
+        
+        if self.mixed_epsilon != 0:
+            lap_x_d = self.operators.laplacian_x @ psi_d
+            lap_y_d = self.operators.laplacian_y @ psi_d
+            lap_x_s = self.operators.laplacian_x @ psi_s
+            lap_y_s = self.operators.laplacian_y @ psi_s
+            
+            mixed_d = self.mixed_epsilon * (lap_x_s - lap_y_s)
+            mixed_s = self.mixed_epsilon * (lap_x_d - lap_y_d)
+        else:
+            mixed_d = 0
+            mixed_s = 0
+        
+        # evaluate RHS for d-wave
+        rhs_d = (
+            lap_d 
+            + self.alpha_d * epsilon_disorder * psi_d 
+            - self.beta_d * abs_sq_psi_d * psi_d
+            - self.gamma_1 * abs_sq_psi_s * psi_d
+            - self.gamma_2 * (psi_s ** 2) * xp.conj(psi_d)
+            + mixed_d
         )
-        result = self.solve_for_psi_squared(**kwargs)
+        
+        # evaluate RHS for s-wave
+        rhs_s = (
+            lap_s 
+            + self.alpha_s * epsilon_disorder * psi_s
+            - self.beta_s * abs_sq_psi_s * psi_s
+            - self.gamma_1 * abs_sq_psi_d * psi_s
+            - self.gamma_2 * (psi_d ** 2) * xp.conj(psi_s)
+            + mixed_s
+        )
+        
+        # We need an adaptive step loop
         for retries in itertools.count():
-            if result is not None:
-                break  # First evaluation of |psi|^2 was successful.
+            # Euler step
+            new_psi_d = U * (psi_d + (dt / self.gamma_d) * rhs_d)
+            new_psi_s = U * (psi_s + (dt / self.gamma_s) * rhs_s)
+            
+            # For stability, check if order parameter blew up or changed too rapidly
+            if xp.all(xp.isfinite(new_psi_d)) and xp.all(xp.isfinite(new_psi_s)):
+                change_d = xp.max(xp.absolute(new_psi_d - U * psi_d))
+                change_s = xp.max(xp.absolute(new_psi_s - U * psi_s))
+                # Enforce a max change of 0.1 per step to maintain explicit Euler stability
+                if change_d <= 0.1 and change_s <= 0.1:
+                    break
+            
             if not options.adaptive or retries > options.max_solve_retries:
                 raise RuntimeError(
                     f"Solver failed to converge in {options.max_solve_retries}"
                     f" retries at step {step} with dt = {dt:.2e}."
-                    f" Try using a smaller dt_init."
+                    f" Try using a smaller dt_init or dt_max."
                 )
-            kwargs["dt"] = dt = dt * options.adaptive_time_step_multiplier
-            result = self.solve_for_psi_squared(**kwargs)
-        psi, new_sq_psi = result
-        return psi, new_sq_psi, dt
+            dt = dt * options.adaptive_time_step_multiplier
+            
+        new_sq_d = xp.absolute(new_psi_d) ** 2
+        new_sq_s = xp.absolute(new_psi_s) ** 2
+        
+        return new_psi_d, new_psi_s, new_sq_d, new_sq_s, dt
 
     def solve_for_observables(
-        self, psi: np.ndarray, dA_dt: Union[float, np.ndarray]
+        self, psi_d: np.ndarray, psi_s: np.ndarray, dA_dt: Union[float, np.ndarray]
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Solves for the scalar potential :math:`\\mu`, the supercurrent density
         :math:`\\mathbf{J}_s`, and the normal current density :math:`\\mathbf{J}_n`.
 
         Args:
-            psi: The order parameter.
+            psi_d: The d-wave order parameter.
+            psi_s: The s-wave order parameter.
             dA_dt: The time-derivative of the vector potential.
 
         Returns:
@@ -504,7 +591,7 @@ class TDGLSolver:
         use_cupy_solver = options.sparse_solver is SparseSolver.CUPY
         operators = self.operators
         # Compute the supercurrent, scalar potential, and normal current
-        supercurrent = operators.get_supercurrent(psi)
+        supercurrent = operators.get_supercurrent(psi_d) + operators.get_supercurrent(psi_s)
         rhs = (operators.divergence @ (supercurrent - dA_dt)) - (
             operators.mu_boundary_laplacian @ self.mu_boundary
         )
@@ -583,7 +670,8 @@ class TDGLSolver:
         running_state: RunningState,
         dt: float,
         *,
-        psi: np.ndarray,
+        psi_d: np.ndarray,
+        psi_s: np.ndarray,
         mu: np.ndarray,
         supercurrent: np.ndarray,
         normal_current: np.ndarray,
@@ -597,7 +685,8 @@ class TDGLSolver:
             state: The solver state, i.e., the solve step, time, and time step
             running_state: A container for scalar data that is saved at each time step
             dt: The time step for the previous solve step
-            psi: The order parameter
+            psi_d: The d-wave order parameter
+            psi_s: The s-wave order parameter
             mu: The scalar potential
             supercurrent: The supercurrent density
             normal_current: The normal current density
@@ -646,7 +735,8 @@ class TDGLSolver:
             self.epsilon = self.update_epsilon(time)
 
         epsilon = self.epsilon
-        old_sq_psi = xp.absolute(psi) ** 2
+        old_sq_psi_d = xp.absolute(psi_d) ** 2
+        old_sq_psi_s = xp.absolute(psi_s) ** 2
         screening_error = np.inf
         A_induced_vals = [A_induced]
         velocity = [0.0]  # Velocity for Polyak's method
@@ -673,11 +763,11 @@ class TDGLSolver:
                 operators.set_link_exponents(current_A_applied + A_induced)
 
             # Update the order parameter using an adaptive time step
-            psi, abs_sq_psi, dt = self.adaptive_euler_step(
-                step, psi, old_sq_psi, mu, epsilon, dt
+            psi_d, psi_s, abs_sq_psi_d, abs_sq_psi_s, dt = self.adaptive_euler_step(
+                step, psi_d, psi_s, old_sq_psi_d, old_sq_psi_s, mu, epsilon, dt
             )
             # Update the scalar potential, supercurrent density, and normal current density
-            mu, supercurrent, normal_current = self.solve_for_observables(psi, dA_dt)
+            mu, supercurrent, normal_current = self.solve_for_observables(psi_d, psi_s, dA_dt)
 
             if options.include_screening:
                 # Evaluate the induced vector potential
@@ -691,14 +781,17 @@ class TDGLSolver:
         if self.probe_points is not None:
             # Update the voltage and phase difference
             running_state.append("mu", mu[self.probe_points])
-            running_state.append("theta", xp.angle(psi[self.probe_points]))
+            if options.simulate_d_wave:
+                running_state.append("theta", xp.angle(psi_d[self.probe_points]))
+            else:
+                running_state.append("theta", xp.angle(psi_s[self.probe_points]))
         if options.include_screening:
             running_state.append("screening_iterations", screening_iteration)
 
         if options.adaptive:
-            # Compute the max abs change in |psi|^2, averaged over the adaptive window,
+            # Compute the max abs change in |psi_d|^2, averaged over the adaptive window,
             # and use it to select a new time step.
-            self.d_psi_sq_vals.append(float(xp.absolute(abs_sq_psi - old_sq_psi).max()))
+            self.d_psi_sq_vals.append(float(xp.absolute(abs_sq_psi_d - old_sq_psi_d).max()))
             window = options.adaptive_window
             if step > window:
                 new_dt = options.dt_init / max(
@@ -706,7 +799,7 @@ class TDGLSolver:
                 )
                 self.tentative_dt = np.clip(0.5 * (new_dt + dt), 0, self.dt_max)
 
-        results = [dt, psi, mu, supercurrent, normal_current, A_induced]
+        results = [dt, psi_d, psi_s, mu, supercurrent, normal_current, A_induced]
         if self.dynamic_vector_potential:
             results.append(current_A_applied)
         if self.dynamic_epsilon:
@@ -731,7 +824,8 @@ class TDGLSolver:
         # Set the initial conditions.
         if self.seed_solution is None:
             parameters = {
-                "psi": self.psi_init,
+                "psi_d": self.psi_d_init,
+                "psi_s": self.psi_s_init,
                 "mu": self.mu_init,
                 "supercurrent": np.zeros(num_edges),
                 "normal_current": np.zeros(num_edges),
@@ -744,7 +838,8 @@ class TDGLSolver:
                 )
             seed_data = seed_solution.tdgl_data
             parameters = {
-                "psi": seed_data.psi,
+                "psi_d": getattr(seed_data, "psi_d", seed_data.psi),
+                "psi_s": getattr(seed_data, "psi_s", np.zeros_like(seed_data.psi)),
                 "mu": seed_data.mu,
                 "supercurrent": seed_data.supercurrent,
                 "normal_current": seed_data.normal_current,
