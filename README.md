@@ -45,5 +45,4 @@ Build a `tdgl.Device` and call `tdgl.solve` as shown in the
 - Lei, Aruna, and Wang, [d+d'](https://arxiv.org/abs/cond-mat/0004227)
 - Zhitomirsky and Dao, [two-band GL](https://doi.org/10.1103/PhysRevB.69.054508)
 
-MIT licensed. Maintained by Nikhil Kodali; based on pyTDGL by Logan
-Bishop-Van Horn and its contributors.
+MIT licensed. Maintained by Nikhil Kodali; based on pyTDGL by Logan Bishop-Van Horn and its contributors.

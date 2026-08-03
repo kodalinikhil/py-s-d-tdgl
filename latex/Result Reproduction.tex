@@ -4,6 +4,7 @@
 \usepackage[margin=1in]{geometry}
 \usepackage[pdftex]{graphicx}
 \usepackage{amsmath,amssymb,amsthm}
+\usepackage{float}
 \usepackage{custom}
 \usepackage{lipsum}
 
@@ -44,39 +45,75 @@ The parameters are $\kappa_D = 2, \tau_1=8/3, \tau_3=16/3, \tau_4=2, \nu=-2, \et
 The grid starts off with (everywhere) $\psi_D=1$, $\psi_S=0$, $\v{B}=0$. In the paper, they gradually sweep the field up to $2.5H_{c2}$ and back down to $0$.
 My computer only had the capability to step in intervals of $0.5H_{c2}$, which probably accounts for the differences in behavior below. Another possibility is that solving on a mesh rather than a grid causes differences, but I think that's less likely.
 
-\begin{figure}[htbp]
+\begin{figure}[H]
     \centering
-    \includegraphics[width=0.55\textwidth]{images/goncalves_fig2.png}
+    \includegraphics[width=0.75\textwidth]{images/goncalves_fig2.png}
+    \caption{Field dependence reported by Goncalves et al.}
+\end{figure}
 
-    \vspace{0.5em}
-
-    \begin{minipage}[t]{0.49\textwidth}
-        \centering
-        \includegraphics[width=\linewidth]{images/goncalves_reprod_h_dependence.png}
-    \end{minipage}\hfill
-    \begin{minipage}[t]{0.49\textwidth}
-        \centering
-        \includegraphics[width=\linewidth]{images/goncalves_reprod_trapped_flux.png}
-    \end{minipage}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{images/goncalves_reprod_h_dependence.png}
+    \caption{Reproduced field dependence using a sweep interval of $0.5H_{c2}$.}
 \end{figure}
 
 One issue, among many other differences (due to my intervals), is that there is no vortex remaining when the system gets back to $H = 0$. However, the vortex count seems to roughly track otherwise.
 
-\begin{figure}[htbp]
+\begin{figure}[H]
     \centering
     \includegraphics[width=0.85\textwidth]{images/goncalves_fig6.png}
 
     \vspace{0.5em}
 
     \includegraphics[width=0.8\textwidth]{images/goncalves_reprod_d_wave_H_1.040_1.125.png}
+    \caption{Reference (top) and reproduced (bottom) $d$-wave vortex configurations near $H/H_{c2}=1.1$.}
 \end{figure}
 
-I tried to reproduce these plots by going straight from $H=0$ to the desired values, but again hysteresis seems to cause behavioral differences (in mine there are 8 vortices rather than 6).
+I tried to reproduce the plots in Goncalves's figure 6 by going straight from $H=0$ to the desired values, but again hysteresis seems to cause behavioral differences (in mine there are 8 vortices rather than 6).
 
+\clearpage
 \section{Xu, Ren, Ting, ``Structures of single vortex and vortex lattice in a d-wave superconductor"}
 
+The single-vortex magnitude and magnetic-field profiles reported by Xu, Ren, and Ting are shown below, followed by their phase textures for the dominant $d$-wave and induced $s$-wave components.
 
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/xurenting_fig1.png}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/xurenting_fig2.png}
+    \end{minipage}
+    \caption{Reference single-vortex magnitude profiles for $|\psi_s|$ (left) and $|\psi_d|$ (right).}
+    \label{fig:xurenting-magnitudes}
+\end{figure}
 
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[c]{0.53\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/xurenting_fig3.png}
+    \end{minipage}\hfill
+    \begin{minipage}[c]{0.40\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/xurenting_fig4.png}
+    \end{minipage}
+    \caption{Reference single-vortex magnetic-field profile (left) and phase textures of $\psi_d$ and $\psi_s$ (right).}
+    \label{fig:xurenting-field-phases}
+\end{figure}
+
+The corresponding simulation using the Goncalves parameters, a centered circular defect of radius $0.5\xi$, and $H/H_{c2}=0.5$ is shown below. The level curves show the order-parameter magnitudes and magnetic fields, while the arrows show the phases of $\psi_d$ and $\psi_s$.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.96\textwidth]{images/XuRenTing_defect_r0.5_H_0.5.png}
+    \caption{Xu--Ren--Ting-inspired defect simulation at $H/H_{c2}=0.5$.}
+    \label{fig:xurenting-reproduction}
+\end{figure}
+
+\clearpage
 \section{Lin et al., ``Distinguishing between s+id and s+is pairing symmetries
 in multiband superconductors through spontaneous
 magnetization pattern induced by a defect"}
