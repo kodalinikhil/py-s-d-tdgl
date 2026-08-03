@@ -1,6 +1,7 @@
 from .about import version_dict, version_table
 from .device.device import Device
 from .device.layer import Layer
+from .device.models import DPlusDPrimeModel, SingleBandModel, SPlusDModel, SPlusSModel
 from .device.meshing import generate_mesh
 from .device.polygon import Polygon
 from .em import ureg

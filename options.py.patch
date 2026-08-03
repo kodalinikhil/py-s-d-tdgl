@@ -1,0 +1,29 @@
+--- tdgl/solver/options.py
++++ tdgl/solver/options.py
+@@ -62,7 +62,7 @@
+         screening_step_size: Step size :math:`\alpha` for Polyak's method.
+         screening_step_drag: Drag parameter :math:`\beta` for Polyak's method.
+-        simulate_d_wave: Whether to simulate the d-wave order parameter. If False,
+-            the d-wave component is kept exactly at zero, effectively resulting in a 
+-            standard single-band s-wave simulation.
++        simulate_d_wave: [DEPRECATED] Use Layer(model=SPlusDModel()) instead.
+     """
+ 
+     solve_time: float
+@@ -89,7 +89,7 @@
+     screening_tolerance: float = 1e-3
+     screening_step_size: float = 0.1
+     screening_step_drag: float = 0.5
+-    simulate_d_wave: bool = True
++    simulate_d_wave: Union[bool, None] = None
+ 
+     def __post_init__(self):
+@@ -101,6 +101,11 @@
+                 self.dt_max = 0.5 * self.dt_init
+         if self.dt_max <= 0:
+             raise ValueError("dt_max must be > 0.")
++        if self.simulate_d_wave is not None:
++            import warnings
++            warnings.warn("simulate_d_wave is deprecated. Please specify a model on the Layer instead (e.g. Layer(..., model=SPlusDModel())).", DeprecationWarning, stacklevel=2)
+ 
+     def validate(self) -> None:

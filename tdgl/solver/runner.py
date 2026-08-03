@@ -358,13 +358,17 @@ class Runner:
         bar_format = "{l_bar}{bar}" + r_bar
         it = itertools.count()
 
+        last_saved_step = None
+
         def save_step(step):
+            nonlocal last_saved_step
             data = dict(zip(self.names, self.values))
             if step == 0:
                 running_state = None
             else:
                 running_state = self.running_state.values
             self.data_handler.save_time_step(self.state, data, running_state)
+            last_saved_step = self.state["step"]
 
         cancelled = False
         with tqdm(
@@ -378,7 +382,7 @@ class Runner:
         ) as pbar:
             for i in it:
                 try:
-                    dt = self.dt
+                    dt = min(self.dt, end_time - self.time)
                     self.state["step"] = i
                     self.state["time"] = self.time
                     self.state["dt"] = dt
@@ -414,23 +418,34 @@ class Runner:
                             ]
                             _ = subprocess.Popen(cmd, start_new_session=True)
                     # Run time step.
-                    function_result = self.function(
-                        self.state,
-                        self.running_state,
-                        dt,
-                        **dict(zip(self.names, self.values)),
-                    )
+                    # The solver may increase an adaptive time step beyond the
+                    # previously accepted value, but it must not step past this
+                    # stage's end time. Keep that cap separate from ``dt``.
+                    self.state["_remaining_time"] = end_time - self.time
+                    try:
+                        function_result = self.function(
+                            self.state,
+                            self.running_state,
+                            dt,
+                            **dict(zip(self.names, self.values)),
+                        )
+                    finally:
+                        self.state.pop("_remaining_time", None)
                     new_dt, *self.values = function_result
+                    used_dt = new_dt
                     # tqdm will spit out a warning if you try to update past "total"
-                    if self.time + dt < end_time:
-                        pbar.update(dt)
+                    if self.time + used_dt < end_time:
+                        pbar.update(used_dt)
                     else:
                         pbar.update(end_time - self.time)
-                    if self.time >= end_time:
-                        break
                     self.dt = new_dt
                     self.running_state.step += 1
-                    self.time += self.dt
+                    self.time += used_dt
+                    if self.time >= end_time:
+                        self.state["step"] = i + 1
+                        self.state["time"] = self.time
+                        self.state["dt"] = used_dt
+                        break
                 except KeyboardInterrupt:
                     msg = f"{{}} simulation at step {i} of stage {name!r}."
                     if self.options.pause_on_interrupt:
@@ -449,6 +464,6 @@ class Runner:
                         self.logger.warning(msg.format("Cancelling"))
                         cancelled = True
                         break
-            if save and (i % self.options.save_every):
-                save_step(i)
+            if save and self.state["step"] != last_saved_step:
+                save_step(self.state["step"])
             return not cancelled

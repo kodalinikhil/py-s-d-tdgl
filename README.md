@@ -1,36 +1,49 @@
-# py(s+d)TDGL
+# py-s-d-TDGL
 
-## Motivation
-`py(s+d)TDGL` solves a 2D generalized time-dependent Ginzburg-Landau (TDGL) equation, enabling simulations of vortex and phase dynamics in thin film superconducting devices. It extends the standard 2D TDGL equation by incorporating additional degrees of freedom associated with multiple superconducting order parameters, such as the d-wave and s-wave order parameters.
+An experimental 2D finite-volume TDGL solver for thin-film superconductors,
+forked from [pyTDGL](https://github.com/loganbvh/py-tdgl).
 
-## Install `py(s+d)TDGL`
+It supports four models selected through `tdgl.Layer(model=...)`:
 
-At the moment, to install py(s+d)TDGL, you can clone the repository and install it in editable mode.
+- `SingleBandModel` — standard single-band pyTDGL (default)
+- `SPlusDModel` — mixed s+d
+- `DPlusDPrimeModel` — d(x2-y2)+d(xy), with optional orbital-Zeeman coupling
+- `SPlusSModel` — isotropic two-band s+s
 
-## About `py(s+d)TDGL`
+`DPlusDPrimeModel` and `SPlusSModel` use phenomenological equilibrium-finding
+flows. All multi-component models currently require a prescribed vector
+potential (`include_screening=False`).
 
-N.B. There is still much testing to be done; this project is in its early stages.
+## Install
 
-py(s+d)TDGL is based on the following paper:
-Gonçalves, W. C., Sardella, E., Becerra, V. F., Milošević, M. V., & Peeters, F. M. (2014). Numerical solution of the time dependent Ginzburg-Landau equations for mixed (d + s)-wave superconductors. Journal of Mathematical Physics, 55, 041501. https://doi.org/10.1063/1.4870874
+```bash
+git clone https://github.com/kodalinikhil/py-s-d-tdgl.git
+cd py-s-d-tdgl
+python -m pip install -e .
+```
 
-Unlike it, we do not set the electric potential to zero and we solve the Poisson equation, as that was how base pyTDGL was implemented.
-Now, there are two complex order parameters, and we can model unconventional superconductors, such as high-Tc cuprates, iron pnictides, and heavy-fermion superconductors. 
-Like pyTDGL, this is accurate at temperatures near Tc and for superconductors in the dirty limit. A new issue that arises for the phenomenological description of s+d order parameters is that if relaxation times of the d-wave and s-wave components are vastly different, it may not capture some of the microscopic physics. See: 
-Zhu, J.-X., Kim, W., Ting, C. S., & Hu, C.-R. (1999). Time-dependent Ginzburg-Landau equations for mixed d- and s-wave superconductors. Physical Review B, 59(17), 11527–11534. https://doi.org/10.1103/PhysRevB.59.11527
+## Use
 
-As such, this program is most effective if all we care about is the static end state (equilibrium) and not the dynamics.
-To revert to the single-band s-wave case, set simulate_d_wave=False in the solver parameters.
+```python
+import tdgl
 
-### Authors
+layer = tdgl.Layer(
+    coherence_length=1,
+    london_lambda=2,
+    thickness=0.1,
+    model=tdgl.SPlusDModel(eta_v=0.25),
+)
+```
 
-- Nikhil Kodali
+Build a `tdgl.Device` and call `tdgl.solve` as shown in the
+[quickstart notebook](docs/notebooks/quickstart.ipynb).
 
-### Citing `py(s+d)TDGL`
+## References
 
-Cite the github repository.
+- Bishop-Van Horn, *Computer Physics Communications* **291**, 108799 (2023), [pyTDGL](https://doi.org/10.1016/j.cpc.2023.108799)
+- Gonçalves et al., *Journal of Mathematical Physics* **55**, 041501 (2014), [s+d](https://doi.org/10.1063/1.4870874)
+- Lei, Aruna, and Wang, [d+d'](https://arxiv.org/abs/cond-mat/0004227)
+- Zhitomirsky and Dao, [two-band GL](https://doi.org/10.1103/PhysRevB.69.054508)
 
-### Acknowledgments
-
-This is forked off of Logan Bishop-Van Horn's pyTDGL repository: https://github.com/loganbvh/py-tdgl. His work, and the work of all who have contributed directly or indirectly to pyTDGL is acknowledged here.
-
+MIT licensed. Maintained by Nikhil Kodali; based on pyTDGL by Logan
+Bishop-Van Horn and its contributors.

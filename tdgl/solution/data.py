@@ -7,6 +7,7 @@ import matplotlib.tri as mtri
 import numpy as np
 from tqdm import tqdm
 
+from ..device.models import SPlusDModel
 from ..finite_volume.mesh import Mesh
 from ..geometry import path_vectors
 
@@ -73,20 +74,23 @@ class TDGLData:
         step: The solver iteration.
         epsilon: The disorder parameter. :math:`\\epsilon<1` weakens the
             order parameter.
-        psi_d: The complex d-wave order parameter at each site in the mesh.
-        psi_s: The complex s-wave order parameter at each site in the mesh.
+        psi1: The first complex order-parameter component at each mesh site.
+        psi2: The second complex order-parameter component at each mesh site.
         mu: The scalar potential at each site in the mesh.
         applied_vector_potential: The applied vector potential at each edge in the mesh.
         induced_vector_potential: The induced vector potential at each edge in the mesh.
-        supercurrent: The supercurrent density at each edge in the mesh.
+        supercurrent: The supercurrent density at each edge in the mesh. For
+            multi-component models this is the Poisson-normalized condensate
+            current (``J_s / beta_em`` for ``SPlusDModel`` and
+            ``J_s / em_coupling`` for ``DPlusDPrimeModel`` and ``SPlusSModel``).
         normal_current: The normal density at each edge in the mesh.
         state: The solver state for the current iteration.
     """
 
     step: int
     epsilon: np.ndarray
-    psi_d: np.ndarray
-    psi_s: np.ndarray
+    psi1: np.ndarray
+    psi2: np.ndarray
     mu: np.ndarray
     applied_vector_potential: np.ndarray
     induced_vector_potential: np.ndarray
@@ -96,8 +100,21 @@ class TDGLData:
 
     @property
     def psi(self) -> np.ndarray:
-        """Alias for the s-wave order parameter (psi_s) for backwards compatibility."""
-        return self.psi_s
+        """Alias for component 1 for single-band backwards compatibility."""
+        return self.psi1
+
+    @property
+    def psi_s(self) -> np.ndarray:
+        """Legacy s-wave alias for component 1.
+
+        For ``SPlusSModel`` both :attr:`psi1` and :attr:`psi2` are s-wave.
+        """
+        return self.psi1
+
+    @property
+    def psi_d(self) -> np.ndarray:
+        """Legacy d-wave alias for component 2 in ``SPlusDModel`` output."""
+        return self.psi2
 
     @staticmethod
     def from_hdf5(h5file: Union[h5py.File, h5py.Group], step: int) -> "TDGLData":
@@ -117,10 +134,12 @@ class TDGLData:
                 return int(step)
             if key in ["state"]:
                 return load_state_data(h5file, step)
-            
-            # Backwards compatibility for psi -> psi_s
-            if key == "psi_s":
-                if "psi_s" in h5file["data"][step]:
+
+            # Canonical component 1, with legacy single-band and s+d names.
+            if key == "psi1":
+                if "psi1" in h5file["data"][step]:
+                    dset = h5file["data"][step]["psi1"]
+                elif "psi_s" in h5file["data"][step]:
                     dset = h5file["data"][step]["psi_s"]
                 elif "psi" in h5file["data"][step]:
                     dset = h5file["data"][step]["psi"]
@@ -128,16 +147,20 @@ class TDGLData:
                     return default
                 dset.refresh()
                 return np.array(dset)
-            
-            # Default to zero for psi_d if not found
-            if key == "psi_d":
-                if "psi_d" in h5file["data"][step]:
+
+            # Canonical component 2; zero for legacy single-component files.
+            if key == "psi2":
+                if "psi2" in h5file["data"][step]:
+                    dset = h5file["data"][step]["psi2"]
+                    dset.refresh()
+                    return np.array(dset)
+                elif "psi_d" in h5file["data"][step]:
                     dset = h5file["data"][step]["psi_d"]
                     dset.refresh()
                     return np.array(dset)
                 else:
-                    return np.zeros_like(get("psi_s"))
-            
+                    return np.zeros_like(get("psi1"))
+
             if key in h5file:
                 dset = h5file[key]
                 dset.refresh()
@@ -432,14 +455,18 @@ class DynamicsData:
                 if "running_state" not in grp:
                     continue
                 grp = grp["running_state"]
-                dts.append(np.array(grp["dt"]))
+                dts.append(np.atleast_1d(np.array(grp["dt"])))
                 if "mu" in grp:
-                    mus.append(np.array(grp["mu"]))
+                    m = np.array(grp["mu"])
+                    mus.append(m if m.ndim == 2 else m[:, np.newaxis])
                 if "theta" in grp:
-                    thetas.append(np.array(grp["theta"]))
+                    t = np.array(grp["theta"])
+                    thetas.append(t if t.ndim == 2 else t[:, np.newaxis])
                 if "screening_iterations" in grp:
-                    screening_iterations.append(np.array(grp["screening_iterations"]))
-            dt = np.concatenate(dts)
+                    screening_iterations.append(
+                        np.atleast_1d(np.array(grp["screening_iterations"]))
+                    )
+            dt = np.concatenate(dts) if dts else np.array([])
             mask = dt > 0
             dt = dt[mask]
             mu = theta = iterations = None
@@ -491,6 +518,19 @@ class DynamicsData:
 
         solution = Solution.from_hdf5(solution_path)
         device = solution.device
+        # The d-wave component is the established phase observable for s+d.
+        # Single-band and s+s models use component 1. This distinction matters
+        # now that every new snapshot contains both canonical component names.
+        use_component2 = isinstance(device.layer.model, SPlusDModel)
+        phase_keys = (
+            ("psi2", "psi_d")
+            if use_component2
+            else (
+                "psi1",
+                "psi_s",
+                "psi",
+            )
+        )
         mesh = device.mesh
         if probe_points is None:
             probe_points = device.probe_points
@@ -523,10 +563,16 @@ class DynamicsData:
                 grp = h5file[f"data/{i}"]
                 times[i] = float(grp.attrs["time"])
                 mus[:, i] = np.array(grp["mu"])[probe_point_indices]
-                if "psi_d" in grp:
-                    thetas[:, i] = np.angle(np.array(grp["psi_d"]))[probe_point_indices]
+                for phase_key in phase_keys:
+                    if phase_key in grp:
+                        thetas[:, i] = np.angle(np.array(grp[phase_key]))[
+                            probe_point_indices
+                        ]
+                        break
                 else:
-                    thetas[:, i] = np.angle(np.array(grp["psi"]))[probe_point_indices]
+                    raise KeyError(
+                        f"None of the phase datasets {phase_keys!r} exist in {grp.name}."
+                    )
 
         return DynamicsData(dt=np.diff(times), mu=mus, theta=thetas)
 

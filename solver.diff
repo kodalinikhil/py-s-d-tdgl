@@ -1,0 +1,391 @@
+--- solver_old.py	2026-07-22 21:44:36
++++ tdgl/solver/solver.py	2026-07-22 21:03:25
+@@ -25,6 +25,7 @@
+ from ..parameter import Parameter
+ from ..solution.solution import Solution
+ from ..sources.constant import ConstantField
++from ..device.models import SingleBandModel, SPlusDModel, SPlusSModel
+ from .options import SolverOptions, SparseSolver
+ from .runner import DataHandler, Runner, RunningState
+ from .screening import get_A_induced_cupy, get_A_induced_numba
+@@ -76,8 +77,8 @@
+     """
+ 
+     dt: float
+-    psi_d: np.ndarray
+-    psi_s: np.ndarray
++    psi2: np.ndarray
++    psi1: np.ndarray
+     mu: np.ndarray
+     supercurrent: np.ndarray
+     normal_current: np.ndarray
+@@ -150,17 +151,8 @@
+         normalized_directions = mesh.edge_mesh.normalized_directions
+         length_units = ureg(device.length_units)
+         xi = device.coherence_length.magnitude
++        self.model = device.layer.model
+         self.u = device.layer.u
+-        self.gamma = device.layer.gamma
+-        self.gamma_d = device.layer.gamma_d
+-        self.gamma_s = device.layer.gamma_s
+-        self.alpha_d = device.layer.alpha_d
+-        self.alpha_s = device.layer.alpha_s
+-        self.beta_d = device.layer.beta_d
+-        self.beta_s = device.layer.beta_s
+-        self.gamma_1 = device.layer.gamma_1
+-        self.gamma_2 = device.layer.gamma_2
+-        self.mixed_epsilon = device.layer.epsilon
+         K0 = device.K0
+         A0 = device.A0
+         Bc2 = device.Bc2
+@@ -292,20 +284,20 @@
+             assert pypardiso is not None
+ 
+         # Initialize the order parameter and electric potential
+-        if options.simulate_d_wave:
+-            psi_d_init = np.ones(len(mesh.sites), dtype=np.complex128)
+-            psi_s_init = np.zeros(len(mesh.sites), dtype=np.complex128) + 1e-4 * (
++        if isinstance(self.model, (SPlusDModel, SPlusSModel)):
++            psi2_init = np.ones(len(mesh.sites), dtype=np.complex128)
++            psi1_init = np.zeros(len(mesh.sites), dtype=np.complex128) + 1e-4 * (
+                 np.random.rand(len(mesh.sites)) + 1j * np.random.rand(len(mesh.sites))
+             )
+             if terminal_psi is not None:
+-                psi_d_init[normal_boundary_index] = terminal_psi
+-                psi_s_init[normal_boundary_index] = 0.0
++                psi2_init[normal_boundary_index] = terminal_psi
++                psi1_init[normal_boundary_index] = 0.0
+         else:
+-            psi_d_init = np.zeros(len(mesh.sites), dtype=np.complex128)
+-            psi_s_init = np.ones(len(mesh.sites), dtype=np.complex128)
++            psi2_init = np.zeros(len(mesh.sites), dtype=np.complex128)
++            psi1_init = np.ones(len(mesh.sites), dtype=np.complex128)
+             if terminal_psi is not None:
+-                psi_d_init[normal_boundary_index] = 0.0
+-                psi_s_init[normal_boundary_index] = terminal_psi
++                psi2_init[normal_boundary_index] = 0.0
++                psi1_init[normal_boundary_index] = terminal_psi
+         mu_init = np.zeros(len(mesh.sites))
+         mu_boundary = np.zeros_like(mesh.edge_mesh.boundary_edge_indices, dtype=float)
+ 
+@@ -315,8 +307,8 @@
+             normalized_directions = cupy.asarray(normalized_directions)
+             current_A_applied = cupy.asarray(current_A_applied)
+ 
+-        self.psi_d_init = psi_d_init
+-        self.psi_s_init = psi_s_init
++        self.psi2_init = psi2_init
++        self.psi1_init = psi1_init
+         self.mu_init = mu_init
+         self.epsilon = epsilon
+         self.mu_boundary = mu_boundary
+@@ -337,7 +329,7 @@
+ 
+         # Running list of the max abs change in |psi|^2 between subsequent solve steps.
+         # This list is used to calculate the adaptive time step.
+-        self.d_psi_sq_vals = []
++        self.d_psi1q_vals = []
+         self.tentative_dt = options.dt_init
+         self.dt_max = options.dt_max if options.adaptive else options.dt_init
+ 
+@@ -463,28 +455,28 @@
+     def adaptive_euler_step(
+         self,
+         step: int,
+-        psi_d: np.ndarray,
+-        psi_s: np.ndarray,
+-        abs_sq_psi_d: np.ndarray,
+-        abs_sq_psi_s: np.ndarray,
++        psi2: np.ndarray,
++        psi1: np.ndarray,
++        abs_sq_psi2: np.ndarray,
++        abs_sq_psi1: np.ndarray,
+         mu: np.ndarray,
+         epsilon_disorder: np.ndarray,
+         dt: float,
+     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+         options = self.options
+-        if isinstance(psi_d, np.ndarray):
++        if isinstance(psi2, np.ndarray):
+             xp = np
+         else:
+             xp = cupy
+ 
+-        if not options.simulate_d_wave:
++        if isinstance(self.model, SingleBandModel):
+             # Fall back to original pyTDGL solver for single band
+             kwargs = dict(
+-                psi=psi_s,
+-                abs_sq_psi=abs_sq_psi_s,
++                psi=psi1,
++                abs_sq_psi=abs_sq_psi1,
+                 mu=mu,
+                 epsilon=epsilon_disorder,
+-                gamma=self.gamma,
++                gamma=self.model.gamma,
+                 u=self.u,
+                 dt=dt,
+                 psi_laplacian=self.operators.psi_laplacian,
+@@ -502,59 +494,78 @@
+                 kwargs["dt"] = dt = dt * options.adaptive_time_step_multiplier
+                 result = self.solve_for_psi_squared(**kwargs)
+             
+-            new_psi_s, new_sq_s = result
+-            new_psi_d = psi_d
+-            new_sq_d = abs_sq_psi_d
+-            return new_psi_d, new_psi_s, new_sq_d, new_sq_s, dt
++            new_psi1, new_sq_s = result
++            new_psi2 = psi2
++            new_sq_d = abs_sq_psi2
++            return new_psi2, new_psi1, new_sq_d, new_sq_s, dt
+ 
+         U = xp.exp(-1j * mu * dt)
+         
+         # Calculate Laplacians
+-        lap_d = self.operators.psi_laplacian @ psi_d
+-        lap_s = self.operators.psi_laplacian @ psi_s
++        lap_d = self.operators.psi_laplacian @ psi2
++        lap_s = self.operators.psi_laplacian @ psi1
+         
+-        if self.mixed_epsilon != 0:
+-            lap_x_d = self.operators.laplacian_x @ psi_d
+-            lap_y_d = self.operators.laplacian_y @ psi_d
+-            lap_x_s = self.operators.laplacian_x @ psi_s
+-            lap_y_s = self.operators.laplacian_y @ psi_s
++        if isinstance(self.model, SPlusDModel):
++            if self.model.epsilon != 0:
++                lap_x_d = self.operators.laplacian_x @ psi2
++                lap_y_d = self.operators.laplacian_y @ psi2
++                lap_x_s = self.operators.laplacian_x @ psi1
++                lap_y_s = self.operators.laplacian_y @ psi1
++                
++                mixed_d = self.model.epsilon * (lap_x_s - lap_y_s)
++                mixed_s = self.model.epsilon * (lap_x_d - lap_y_d)
++            else:
++                mixed_d = 0
++                mixed_s = 0
+             
+-            mixed_d = self.mixed_epsilon * (lap_x_s - lap_y_s)
+-            mixed_s = self.mixed_epsilon * (lap_x_d - lap_y_d)
++            # evaluate RHS for d-wave
++            rhs_d = (
++                lap_d 
++                + self.model.alpha2 * epsilon_disorder * psi2 
++                - self.model.beta2 * abs_sq_psi2 * psi2
++                - self.model.gamma_1 * abs_sq_psi1 * psi2
++                - self.model.gamma_2 * (psi1 ** 2) * xp.conj(psi2)
++                + mixed_d
++            )
++            
++            # evaluate RHS for s-wave
++            rhs_s = (
++                lap_s 
++                + self.model.alpha1 * epsilon_disorder * psi1
++                - self.model.beta1 * abs_sq_psi1 * psi1
++                - self.model.gamma_1 * abs_sq_psi2 * psi1
++                - self.model.gamma_2 * (psi2 ** 2) * xp.conj(psi1)
++                + mixed_s
++            )
++        elif isinstance(self.model, SPlusSModel):
++            # evaluate RHS for band 2
++            rhs_d = (
++                (1.0 / self.model.mass_ratio_2) * lap_d 
++                + self.model.alpha2 * epsilon_disorder * psi2 
++                - self.model.beta2 * abs_sq_psi2 * psi2
++                - self.model.gamma_j * psi1
++            )
++            
++            # evaluate RHS for band 1
++            rhs_s = (
++                lap_s 
++                + self.model.alpha1 * epsilon_disorder * psi1
++                - self.model.beta1 * abs_sq_psi1 * psi1
++                - self.model.gamma_j * psi2
++            )
+         else:
+-            mixed_d = 0
+-            mixed_s = 0
++            raise ValueError(f"Unsupported model for adaptive_euler_step: {type(self.model)}")
+         
+-        # evaluate RHS for d-wave
+-        rhs_d = (
+-            lap_d 
+-            + self.alpha_d * epsilon_disorder * psi_d 
+-            - self.beta_d * abs_sq_psi_d * psi_d
+-            - self.gamma_1 * abs_sq_psi_s * psi_d
+-            - self.gamma_2 * (psi_s ** 2) * xp.conj(psi_d)
+-            + mixed_d
+-        )
+-        
+-        # evaluate RHS for s-wave
+-        rhs_s = (
+-            lap_s 
+-            + self.alpha_s * epsilon_disorder * psi_s
+-            - self.beta_s * abs_sq_psi_s * psi_s
+-            - self.gamma_1 * abs_sq_psi_d * psi_s
+-            - self.gamma_2 * (psi_d ** 2) * xp.conj(psi_s)
+-            + mixed_s
+-        )
+-        
+         # We need an adaptive step loop
+         for retries in itertools.count():
+             # Euler step
+-            new_psi_d = U * (psi_d + (dt / self.gamma_d) * rhs_d)
+-            new_psi_s = U * (psi_s + (dt / self.gamma_s) * rhs_s)
++            new_psi2 = U * (psi2 + (dt / self.model.eta2) * rhs_d)
++            new_psi1 = U * (psi1 + (dt / self.model.eta1) * rhs_s)
+             
+             # For stability, check if order parameter blew up or changed too rapidly
+-            if xp.all(xp.isfinite(new_psi_d)) and xp.all(xp.isfinite(new_psi_s)):
+-                change_d = xp.max(xp.absolute(new_psi_d - U * psi_d))
+-                change_s = xp.max(xp.absolute(new_psi_s - U * psi_s))
++            if xp.all(xp.isfinite(new_psi2)) and xp.all(xp.isfinite(new_psi1)):
++                change_d = xp.max(xp.absolute(new_psi2 - U * psi2))
++                change_s = xp.max(xp.absolute(new_psi1 - U * psi1))
+                 # Enforce a max change of 0.1 per step to maintain explicit Euler stability
+                 if change_d <= 0.1 and change_s <= 0.1:
+                     break
+@@ -567,20 +578,20 @@
+                 )
+             dt = dt * options.adaptive_time_step_multiplier
+             
+-        new_sq_d = xp.absolute(new_psi_d) ** 2
+-        new_sq_s = xp.absolute(new_psi_s) ** 2
++        new_sq_d = xp.absolute(new_psi2) ** 2
++        new_sq_s = xp.absolute(new_psi1) ** 2
+         
+-        return new_psi_d, new_psi_s, new_sq_d, new_sq_s, dt
++        return new_psi2, new_psi1, new_sq_d, new_sq_s, dt
+ 
+     def solve_for_observables(
+-        self, psi_d: np.ndarray, psi_s: np.ndarray, dA_dt: Union[float, np.ndarray]
++        self, psi2: np.ndarray, psi1: np.ndarray, dA_dt: Union[float, np.ndarray]
+     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+         """Solves for the scalar potential :math:`\\mu`, the supercurrent density
+         :math:`\\mathbf{J}_s`, and the normal current density :math:`\\mathbf{J}_n`.
+ 
+         Args:
+-            psi_d: The d-wave order parameter.
+-            psi_s: The s-wave order parameter.
++            psi2: The d-wave order parameter.
++            psi1: The s-wave order parameter.
+             dA_dt: The time-derivative of the vector potential.
+ 
+         Returns:
+@@ -591,7 +602,12 @@
+         use_cupy_solver = options.sparse_solver is SparseSolver.CUPY
+         operators = self.operators
+         # Compute the supercurrent, scalar potential, and normal current
+-        supercurrent = operators.get_supercurrent(psi_d) + operators.get_supercurrent(psi_s)
++        if isinstance(self.model, SingleBandModel):
++            supercurrent = operators.get_supercurrent(psi1)
++        elif isinstance(self.model, SPlusSModel):
++            supercurrent = operators.get_supercurrent(psi1) + (1.0 / self.model.mass_ratio_2) * operators.get_supercurrent(psi2)
++        else:
++            supercurrent = operators.get_supercurrent(psi2) + operators.get_supercurrent(psi1)
+         rhs = (operators.divergence @ (supercurrent - dA_dt)) - (
+             operators.mu_boundary_laplacian @ self.mu_boundary
+         )
+@@ -670,8 +686,8 @@
+         running_state: RunningState,
+         dt: float,
+         *,
+-        psi_d: np.ndarray,
+-        psi_s: np.ndarray,
++        psi2: np.ndarray,
++        psi1: np.ndarray,
+         mu: np.ndarray,
+         supercurrent: np.ndarray,
+         normal_current: np.ndarray,
+@@ -685,8 +701,8 @@
+             state: The solver state, i.e., the solve step, time, and time step
+             running_state: A container for scalar data that is saved at each time step
+             dt: The time step for the previous solve step
+-            psi_d: The d-wave order parameter
+-            psi_s: The s-wave order parameter
++            psi2: The d-wave order parameter
++            psi1: The s-wave order parameter
+             mu: The scalar potential
+             supercurrent: The supercurrent density
+             normal_current: The normal current density
+@@ -735,8 +751,8 @@
+             self.epsilon = self.update_epsilon(time)
+ 
+         epsilon = self.epsilon
+-        old_sq_psi_d = xp.absolute(psi_d) ** 2
+-        old_sq_psi_s = xp.absolute(psi_s) ** 2
++        old_sq_psi2 = xp.absolute(psi2) ** 2
++        old_sq_psi1 = xp.absolute(psi1) ** 2
+         screening_error = np.inf
+         A_induced_vals = [A_induced]
+         velocity = [0.0]  # Velocity for Polyak's method
+@@ -763,11 +779,11 @@
+                 operators.set_link_exponents(current_A_applied + A_induced)
+ 
+             # Update the order parameter using an adaptive time step
+-            psi_d, psi_s, abs_sq_psi_d, abs_sq_psi_s, dt = self.adaptive_euler_step(
+-                step, psi_d, psi_s, old_sq_psi_d, old_sq_psi_s, mu, epsilon, dt
++            psi2, psi1, abs_sq_psi2, abs_sq_psi1, dt = self.adaptive_euler_step(
++                step, psi2, psi1, old_sq_psi2, old_sq_psi1, mu, epsilon, dt
+             )
+             # Update the scalar potential, supercurrent density, and normal current density
+-            mu, supercurrent, normal_current = self.solve_for_observables(psi_d, psi_s, dA_dt)
++            mu, supercurrent, normal_current = self.solve_for_observables(psi2, psi1, dA_dt)
+ 
+             if options.include_screening:
+                 # Evaluate the induced vector potential
+@@ -781,25 +797,25 @@
+         if self.probe_points is not None:
+             # Update the voltage and phase difference
+             running_state.append("mu", mu[self.probe_points])
+-            if options.simulate_d_wave:
+-                running_state.append("theta", xp.angle(psi_d[self.probe_points]))
++            if isinstance(self.model, (SPlusDModel, SPlusSModel)):
++                running_state.append("theta", xp.angle(psi2[self.probe_points]))
+             else:
+-                running_state.append("theta", xp.angle(psi_s[self.probe_points]))
++                running_state.append("theta", xp.angle(psi1[self.probe_points]))
+         if options.include_screening:
+             running_state.append("screening_iterations", screening_iteration)
+ 
+         if options.adaptive:
+-            # Compute the max abs change in |psi_d|^2, averaged over the adaptive window,
++            # Compute the max abs change in |psi2|^2, averaged over the adaptive window,
+             # and use it to select a new time step.
+-            self.d_psi_sq_vals.append(float(xp.absolute(abs_sq_psi_d - old_sq_psi_d).max()))
++            self.d_psi1q_vals.append(float(xp.absolute(abs_sq_psi2 - old_sq_psi2).max()))
+             window = options.adaptive_window
+             if step > window:
+                 new_dt = options.dt_init / max(
+-                    1e-10, np.mean(self.d_psi_sq_vals[-window:])
++                    1e-10, np.mean(self.d_psi1q_vals[-window:])
+                 )
+                 self.tentative_dt = np.clip(0.5 * (new_dt + dt), 0, self.dt_max)
+ 
+-        results = [dt, psi_d, psi_s, mu, supercurrent, normal_current, A_induced]
++        results = [dt, psi2, psi1, mu, supercurrent, normal_current, A_induced]
+         if self.dynamic_vector_potential:
+             results.append(current_A_applied)
+         if self.dynamic_epsilon:
+@@ -824,8 +840,8 @@
+         # Set the initial conditions.
+         if self.seed_solution is None:
+             parameters = {
+-                "psi_d": self.psi_d_init,
+-                "psi_s": self.psi_s_init,
++                "psi2": self.psi2_init,
++                "psi1": self.psi1_init,
+                 "mu": self.mu_init,
+                 "supercurrent": np.zeros(num_edges),
+                 "normal_current": np.zeros(num_edges),
+@@ -838,8 +854,8 @@
+                 )
+             seed_data = seed_solution.tdgl_data
+             parameters = {
+-                "psi_d": getattr(seed_data, "psi_d", seed_data.psi),
+-                "psi_s": getattr(seed_data, "psi_s", np.zeros_like(seed_data.psi)),
++                "psi2": getattr(seed_data, "psi2", seed_data.psi),
++                "psi1": getattr(seed_data, "psi1", np.zeros_like(seed_data.psi)),
+                 "mu": seed_data.mu,
+                 "supercurrent": seed_data.supercurrent,
+                 "normal_current": seed_data.normal_current,

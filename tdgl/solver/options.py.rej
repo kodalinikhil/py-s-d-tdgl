@@ -1,0 +1,22 @@
+--- options.py
++++ options.py
+@@ -107,7 +107,7 @@
+     field_units: str = "mT"
+     current_units: str = "uA"
+     output_file: Union[str, None] = None
+-    simulate_d_wave: bool = False
++    simulate_d_wave: Union[bool, None] = None
+     pause_on_keyboard_interrupt: bool = False
+ 
+     def __post_init__(self):
+@@ -118,6 +118,10 @@
+                 self.dt_max = 0.5 * self.dt_init
+         if self.dt_max <= 0:
+             raise ValueError("dt_max must be > 0.")
++        if self.simulate_d_wave is not None:
++            import warnings
++            warnings.warn("simulate_d_wave is deprecated. Please specify a model on the Layer instead (e.g. Layer(..., model=SPlusDModel())).", DeprecationWarning, stacklevel=2)
++
+ 
+     @property
+     def h5path(self) -> str:

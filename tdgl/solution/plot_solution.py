@@ -419,6 +419,7 @@ def plot_field_at_positions(
 def plot_order_parameter(
     solution: Solution,
     squared: bool = False,
+    component: Union[Literal["psi1", "psi2", "s", "d", "d_prime"], int] = "psi1",
     mag_cmap: str = "viridis",
     phase_cmap: str = "twilight_shifted",
     shading: str = "gouraud",
@@ -434,6 +435,8 @@ def plot_order_parameter(
     Args:
         solution: The solution for which to plot the order parameter.
         squared: Whether to plot the magnitude squared, :math:`|\\psi|^2`.
+        component: Condensate component to plot. Use ``"psi1"`` or ``"psi2"``
+            for model-independent access.
         mag_cmap: Name of the colormap to use for the magnitude.
         phase_cmap: Name of the colormap to use for the phase.
         shading: May be ``"flat"`` or ``"gouraud"``. The latter does some interpolation.
@@ -444,12 +447,13 @@ def plot_order_parameter(
     kwargs.setdefault("figsize", (8, 3))
     kwargs.setdefault("constrained_layout", True)
     device = solution.device
-    psi = solution.tdgl_data.psi
+    psi = solution.get_order_parameter(component)
     mag = np.abs(psi)
-    psi_label = "$|\\psi|$"
+    component_label = "d_{xy}" if component == "d_prime" else component
+    psi_label = f"$|\\psi_{{{component_label}}}|$"
     if squared:
         mag = mag**2
-        psi_label = "$|\\psi|^2$"
+        psi_label = f"$|\\psi_{{{component_label}}}|^2$"
     phase = np.angle(psi) / np.pi
     points = device.points
     triangles = device.triangles

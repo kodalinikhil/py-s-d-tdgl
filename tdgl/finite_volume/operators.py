@@ -230,6 +230,119 @@ def build_neumann_boundary_laplacian(
     return neumann_laplacian.tocsr(copy=False)
 
 
+def build_directional_laplacian_weights(mesh: Mesh) -> Tuple[np.ndarray, np.ndarray]:
+    """Build finite-element edge weights for ``partial_x**2`` and
+    ``partial_y**2``.
+
+    The two directional stiffness matrices are assembled from the gradients
+    of the linear basis functions on each triangle. Their sum is the usual
+    cotangent/Voronoi Laplacian weight. Using these weights with the same link
+    variables as the isotropic operator preserves exact discrete gauge
+    covariance and gives a variational natural boundary condition.
+    """
+    sites = mesh.sites
+    elements = mesh.elements
+    edge_lookup = {
+        tuple(edge): index for index, edge in enumerate(mesh.edge_mesh.edges)
+    }
+    weights_x = np.zeros(len(edge_lookup), dtype=float)
+    weights_y = np.zeros(len(edge_lookup), dtype=float)
+
+    for element in elements:
+        coords = sites[element]
+        edge_1 = coords[1] - coords[0]
+        edge_2 = coords[2] - coords[0]
+        twice_area = edge_1[0] * edge_2[1] - edge_1[1] * edge_2[0]
+        if np.isclose(twice_area, 0):
+            raise ValueError("Cannot build operators on a degenerate triangle.")
+        area = abs(twice_area) / 2
+        grad_x = (
+            np.array(
+                [
+                    coords[1, 1] - coords[2, 1],
+                    coords[2, 1] - coords[0, 1],
+                    coords[0, 1] - coords[1, 1],
+                ]
+            )
+            / twice_area
+        )
+        grad_y = (
+            np.array(
+                [
+                    coords[2, 0] - coords[1, 0],
+                    coords[0, 0] - coords[2, 0],
+                    coords[1, 0] - coords[0, 0],
+                ]
+            )
+            / twice_area
+        )
+        for local_i, local_j in ((0, 1), (1, 2), (2, 0)):
+            edge = tuple(sorted((element[local_i], element[local_j])))
+            edge_index = edge_lookup[edge]
+            # The Laplacian is minus the FEM stiffness matrix.
+            weights_x[edge_index] -= area * grad_x[local_i] * grad_x[local_j]
+            weights_y[edge_index] -= area * grad_y[local_i] * grad_y[local_j]
+
+    return weights_x, weights_y
+
+
+def build_magnetic_field_curl(mesh: Mesh) -> Tuple[sp.csr_array, sp.csr_array]:
+    """Build operators that map an edge-centered vector potential to site fields.
+
+    The magnetic induction on each triangle is evaluated by the discrete Stokes
+    theorem using the same edge-center line integrals as the link variables.
+    Triangle values are then area averaged onto their incident mesh sites. For
+    a linear vector potential (including the symmetric gauge for a uniform
+    field), this construction returns the exact curl.
+    """
+    sites = mesh.sites
+    elements = mesh.elements
+    edge_mesh = mesh.edge_mesh
+    edge_lookup = {tuple(edge): i for i, edge in enumerate(edge_mesh.edges)}
+
+    triangle_areas = np.empty(len(elements), dtype=float)
+    oriented_elements = np.empty_like(elements)
+    for index, element in enumerate(elements):
+        coords = sites[element]
+        edge_1 = coords[1] - coords[0]
+        edge_2 = coords[2] - coords[0]
+        twice_area = edge_1[0] * edge_2[1] - edge_1[1] * edge_2[0]
+        if np.isclose(twice_area, 0):
+            raise ValueError("Cannot build curl on a degenerate triangle.")
+        triangle_areas[index] = abs(twice_area) / 2
+        oriented_elements[index] = element if twice_area > 0 else element[[0, 2, 1]]
+
+    incident_areas = np.bincount(
+        elements.ravel(),
+        weights=np.repeat(triangle_areas, 3),
+        minlength=len(sites),
+    )
+    rows = []
+    cols = []
+    values_x = []
+    values_y = []
+    for element in oriented_elements:
+        for start, end in (
+            (element[0], element[1]),
+            (element[1], element[2]),
+            (element[2], element[0]),
+        ):
+            edge_index = edge_lookup[tuple(sorted((start, end)))]
+            stored_start, stored_end = edge_mesh.edges[edge_index]
+            sign = 1 if (stored_start == start and stored_end == end) else -1
+            dx, dy = sign * edge_mesh.directions[edge_index]
+            for site_index in element:
+                rows.append(site_index)
+                cols.append(edge_index)
+                values_x.append(dx / incident_areas[site_index])
+                values_y.append(dy / incident_areas[site_index])
+
+    shape = (len(sites), len(edge_mesh.edges))
+    curl_x = sp.csr_array((values_x, (rows, cols)), shape=shape)
+    curl_y = sp.csr_array((values_y, (rows, cols)), shape=shape)
+    return curl_x, curl_y
+
+
 class MeshOperators:
     """A container for the finite volume operators for a given mesh.
 
@@ -240,7 +353,7 @@ class MeshOperators:
         use_cupy: Use CuPy for linear algebra.
         fixed_sites: The indices of any sites for which the value of :math:`\\psi`
             and :math:`\\mu` are fixed as boundary conditions.
-        
+
     Attributes:
         laplacian_x: Directional Laplacian matrix for the x-direction.
         laplacian_y: Directional Laplacian matrix for the y-direction.
@@ -263,6 +376,7 @@ class MeshOperators:
         self.sparse_solver = sparse_solver
         self.fixed_sites = fixed_sites
         self.fix_psi = fix_psi
+        self.mu_reference_index = 0
         self.laplacian_free_rows: Union[np.ndarray, None] = None
         self.divergence: Union[sp.spmatrix, None] = None
         self.mu_laplacian: Union[sp.spmatrix, None] = None
@@ -272,15 +386,40 @@ class MeshOperators:
         self.psi_laplacian: Union[sp.spmatrix, None] = None
         self.laplacian_x: Union[sp.spmatrix, None] = None
         self.laplacian_y: Union[sp.spmatrix, None] = None
+        self.magnetic_field_curl_x: Union[sp.spmatrix, None] = None
+        self.magnetic_field_curl_y: Union[sp.spmatrix, None] = None
         self.link_exponents: Union[np.ndarray, None] = None
         # Compute these quantities just once, as they never change.
         self.gradient_weights = 1 / edge_mesh.edge_lengths
         self.laplacian_weights = edge_mesh.dual_edge_lengths / edge_mesh.edge_lengths
-        
-        u_x = edge_mesh.normalized_directions[:, 0]
-        u_y = edge_mesh.normalized_directions[:, 1]
-        self.laplacian_weights_x = self.laplacian_weights * (u_x ** 2)
-        self.laplacian_weights_y = self.laplacian_weights * (u_y ** 2)
+
+        (
+            self.laplacian_weights_x,
+            self.laplacian_weights_y,
+        ) = build_directional_laplacian_weights(mesh)
+        directional_sum = self.laplacian_weights_x + self.laplacian_weights_y
+        # pyTDGL uses positive boundary dual lengths, while a boundary cotangent
+        # weight can be negative for an obtuse boundary triangle. Normalize the
+        # FEM x/y split edgewise so its sum remains exactly the established
+        # pyTDGL isotropic operator.
+        nonzero = ~np.isclose(directional_sum, 0)
+        scale = np.ones_like(directional_sum)
+        scale[nonzero] = self.laplacian_weights[nonzero] / directional_sum[nonzero]
+        self.laplacian_weights_x *= scale
+        self.laplacian_weights_y *= scale
+        zero = ~nonzero & ~np.isclose(self.laplacian_weights, 0)
+        if np.any(zero):
+            unit_x_sq = edge_mesh.normalized_directions[zero, 0] ** 2
+            self.laplacian_weights_x[zero] = self.laplacian_weights[zero] * unit_x_sq
+            self.laplacian_weights_y[zero] = self.laplacian_weights[zero] * (
+                1 - unit_x_sq
+            )
+        self.mixed_current_weights = np.divide(
+            self.laplacian_weights_y - self.laplacian_weights_x,
+            self.laplacian_weights,
+            out=np.zeros_like(self.laplacian_weights),
+            where=~np.isclose(self.laplacian_weights, 0),
+        )
         self.gradient_link_rows = np.arange(len(edge_mesh.edges), dtype=int)
         self.gradient_link_cols = edge_mesh.edges[:, 1]
         self.laplacian_link_rows = np.concatenate(
@@ -293,15 +432,28 @@ class MeshOperators:
     def build_operators(self) -> None:
         """Construct the vector potential-independent operators."""
         mesh = self.mesh
-        self.mu_laplacian, _ = build_laplacian(mesh, weights=self.laplacian_weights)
-        self.mu_boundary_laplacian = build_neumann_boundary_laplacian(mesh)
+        mu_fixed_sites = np.array([self.mu_reference_index], dtype=int)
+        self.mu_laplacian, _ = build_laplacian(
+            mesh,
+            fixed_sites=mu_fixed_sites,
+            weights=self.laplacian_weights,
+        )
+        self.mu_boundary_laplacian = build_neumann_boundary_laplacian(
+            mesh, fixed_sites=mu_fixed_sites
+        )
         self.mu_gradient = build_gradient(mesh, weights=self.gradient_weights)
         self.divergence = build_divergence(mesh)
+        (
+            self.magnetic_field_curl_x,
+            self.magnetic_field_curl_y,
+        ) = build_magnetic_field_curl(mesh)
         if self.use_cupy:
             assert cupy is not None
             self.mu_boundary_laplacian = csr_matrix(self.mu_boundary_laplacian)
             self.mu_gradient = csr_matrix(self.mu_gradient)
             self.divergence = csr_matrix(self.divergence)
+            self.magnetic_field_curl_x = csr_matrix(self.magnetic_field_curl_x)
+            self.magnetic_field_curl_y = csr_matrix(self.magnetic_field_curl_y)
             self.areas = cupy.array(self.areas)
             self.edge_directions = cupy.array(self.edge_directions)
         if self.sparse_solver is SparseSolver.CUPY:
@@ -371,6 +523,7 @@ class MeshOperators:
                 self.laplacian_weights = cupy.asarray(self.laplacian_weights)
                 self.laplacian_weights_x = cupy.asarray(self.laplacian_weights_x)
                 self.laplacian_weights_y = cupy.asarray(self.laplacian_weights_y)
+                self.mixed_current_weights = cupy.asarray(self.mixed_current_weights)
             return
         # Just update the link variables
         edges = self.edges
@@ -439,3 +592,63 @@ class MeshOperators:
             The supercurrent at each edge.
         """
         return (psi.conjugate()[self.edges[:, 0]] * (self.psi_gradient @ psi)).imag
+
+    def get_magnetic_field(self, vector_potential: np.ndarray) -> np.ndarray:
+        """Return the dimensionless perpendicular induction on mesh sites.
+
+        Args:
+            vector_potential: Edge-centered vector potential with shape
+                ``(num_edges, 2)`` in the solver's dimensionless units.
+        """
+        xp = cupy if self.use_cupy else np
+        vector_potential = xp.asarray(vector_potential)
+        expected_shape = (len(self.edges), 2)
+        if vector_potential.shape != expected_shape:
+            raise ValueError(
+                f"vector_potential must have shape {expected_shape}, "
+                f"got {vector_potential.shape}."
+            )
+        return self.magnetic_field_curl_x @ vector_potential[:, 0] + (
+            self.magnetic_field_curl_y @ vector_potential[:, 1]
+        )
+
+    def get_s_plus_s_supercurrent(
+        self,
+        psi1: np.ndarray,
+        psi2: np.ndarray,
+        *,
+        k2_over_k1: float,
+    ) -> np.ndarray:
+        """Return the unscaled current of two isotropic s-wave condensates.
+
+        ``k2_over_k1`` is the ratio of the two gradient-energy coefficients,
+        so the same ratio multiplies the second condensate's current.
+        """
+        return self.get_supercurrent(psi1) + k2_over_k1 * self.get_supercurrent(psi2)
+
+    def get_s_plus_d_supercurrent(
+        self,
+        psi_d: np.ndarray,
+        psi_s: np.ndarray,
+        *,
+        eta_s: float,
+        eta_v: float,
+    ) -> np.ndarray:
+        """Return the complete, unscaled d+s condensate current on edges.
+
+        The returned current uses the paper normalization, before division by
+        ``beta_em``. The mixed-current multiplier is derived from the same
+        directional edge energy as ``laplacian_x - laplacian_y``. It is
+        negative on x-aligned edges and positive on y-aligned edges.
+        """
+        edges0 = self.edges[:, 0]
+        grad_d = self.psi_gradient @ psi_d
+        grad_s = self.psi_gradient @ psi_s
+        diagonal = (psi_d.conjugate()[edges0] * grad_d).imag
+        diagonal += eta_s * (psi_s.conjugate()[edges0] * grad_s).imag
+        if eta_v == 0:
+            return diagonal
+        mixed = (
+            psi_d.conjugate()[edges0] * grad_s + psi_s.conjugate()[edges0] * grad_d
+        ).imag
+        return diagonal + eta_v * self.mixed_current_weights * mixed

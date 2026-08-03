@@ -136,7 +136,10 @@ def screening_device() -> tdgl.Device:
     width = 2
 
     layer = tdgl.Layer(
-        coherence_length=xi, london_lambda=london_lambda, thickness=thickness
+        model=tdgl.SingleBandModel(),
+        coherence_length=xi,
+        london_lambda=london_lambda,
+        thickness=thickness,
     )
     film = tdgl.Polygon("film", points=tdgl.geometry.box(width, height, points=301))
     device = tdgl.Device(

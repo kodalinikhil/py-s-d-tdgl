@@ -69,6 +69,18 @@ Layer
 .. autoclass:: tdgl.Layer
     :members:
 
+.. autoclass:: tdgl.SingleBandModel
+    :members:
+
+.. autoclass:: tdgl.SPlusDModel
+    :members:
+
+.. autoclass:: tdgl.DPlusDPrimeModel
+    :members:
+
+.. autoclass:: tdgl.SPlusSModel
+    :members:
+
 Polygon
 -------
 .. autoclass:: tdgl.Polygon

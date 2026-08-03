@@ -1,32 +1,26 @@
-from typing import Union
+import copy
+import dataclasses
+import warnings
+from typing import Optional, Union
 
 import h5py
+
+from .models import DPlusDPrimeModel, SingleBandModel, SPlusDModel, SPlusSModel
 
 
 class Layer:
     """A superconducting thin film.
 
     Args:
-        london_lambda: The London penetration depth of the film.
-        coherence_length: The superconducting coherence length of the film.
-        thickness: The thickness of the film.
-        conductivity: The normal state conductivity of the superconductor in
-            Siemens / length_unit.
-        u: The ratio of the relaxation times for the order parameter amplitude
-            and phase. This value is 5.79 for dirty superconductors.
-        gamma: This parameter quantifies the effect of inelastic phonon-electron
-            scattering. :math:`\\gamma` is proportional to the inelastic scattering
-            time and the size of the superconducting gap.
-        z0: Vertical location of the film.
-        gamma_d: Inelastic scattering time scale for the d-wave component.
-        gamma_s: Inelastic scattering time scale for the s-wave component.
-        alpha_d: Linear free energy coefficient for the d-wave component.
-        alpha_s: Linear free energy coefficient for the s-wave component.
-        beta_d: Nonlinear free energy coefficient for the d-wave component.
-        beta_s: Nonlinear free energy coefficient for the s-wave component.
-        gamma_1: Coupling constant for the $|\\psi_d|^2 |\\psi_s|^2$ mixed term.
-        gamma_2: Coupling constant for the $\\psi_d^2 \\psi_s^{*2} + c.c.$ mixed term.
-        epsilon: Mixed spatial gradient coupling coefficient.
+        coherence_length: The superconducting coherence length, :math:`\\xi`.
+        london_lambda: The London penetration depth, :math:`\\lambda`.
+        thickness: The superconducting film thickness, :math:`d`.
+        model: The time-dependent Ginzburg-Landau model to use.
+        conductivity: The normal state conductivity of the layer, :math:`\\sigma`.
+        u: The ratio of relaxation times for the order parameter, :math:`u`.
+        gamma: Backwards-compatible shortcut for ``SingleBandModel(gamma=...)``.
+            It is ignored, with a warning, for multi-component models.
+        z0: The vertical position of the layer.
     """
 
     def __init__(
@@ -35,36 +29,36 @@ class Layer:
         london_lambda: float,
         coherence_length: float,
         thickness: float,
+        model: Optional[
+            Union[SingleBandModel, SPlusDModel, DPlusDPrimeModel, SPlusSModel]
+        ] = None,
         conductivity: Union[float, None] = None,
         u: float = 5.79,
-        gamma: float = 10.0,
+        gamma: Optional[float] = None,
         z0: float = 0,
-        gamma_d: float = 1.0,
-        gamma_s: float = 1.0,
-        alpha_d: float = 1.0,
-        alpha_s: float = 1.0,
-        beta_d: float = 1.0,
-        beta_s: float = 1.0,
-        gamma_1: float = 0.0,
-        gamma_2: float = 0.0,
-        epsilon: float = 0.0,
     ):
         self.london_lambda = london_lambda
         self.coherence_length = coherence_length
         self.thickness = thickness
         self.conductivity = conductivity
         self.u = u
-        self.gamma = gamma
         self.z0 = z0
-        self.gamma_d = gamma_d
-        self.gamma_s = gamma_s
-        self.alpha_d = alpha_d
-        self.alpha_s = alpha_s
-        self.beta_d = beta_d
-        self.beta_s = beta_s
-        self.gamma_1 = gamma_1
-        self.gamma_2 = gamma_2
-        self.epsilon = epsilon
+        if model is None:
+            self.model = SingleBandModel(
+                gamma=SingleBandModel.gamma if gamma is None else gamma
+            )
+        else:
+            self.model = model
+            if gamma is not None and not isinstance(model, SingleBandModel):
+                warnings.warn(
+                    "Layer.gamma is ignored for multi-component models; their "
+                    "equations do not use the single-band KWT gamma term.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        validate_model = getattr(self.model, "validate", None)
+        if validate_model is not None:
+            validate_model()
 
     @property
     def Lambda(self) -> float:
@@ -77,19 +71,10 @@ class Layer:
             london_lambda=self.london_lambda,
             coherence_length=self.coherence_length,
             thickness=self.thickness,
+            model=copy.deepcopy(self.model),
             conductivity=self.conductivity,
             u=self.u,
-            gamma=self.gamma,
             z0=self.z0,
-            gamma_d=self.gamma_d,
-            gamma_s=self.gamma_s,
-            alpha_d=self.alpha_d,
-            alpha_s=self.alpha_s,
-            beta_d=self.beta_d,
-            beta_s=self.beta_s,
-            gamma_1=self.gamma_1,
-            gamma_2=self.gamma_2,
-            epsilon=self.epsilon,
         )
 
     def to_hdf5(self, h5_group: h5py.Group) -> None:
@@ -102,19 +87,14 @@ class Layer:
         h5_group.attrs["coherence_length"] = self.coherence_length
         h5_group.attrs["thickness"] = self.thickness
         h5_group.attrs["u"] = self.u
-        h5_group.attrs["gamma"] = self.gamma
         h5_group.attrs["z0"] = self.z0
-        h5_group.attrs["gamma_d"] = self.gamma_d
-        h5_group.attrs["gamma_s"] = self.gamma_s
-        h5_group.attrs["alpha_d"] = self.alpha_d
-        h5_group.attrs["alpha_s"] = self.alpha_s
-        h5_group.attrs["beta_d"] = self.beta_d
-        h5_group.attrs["beta_s"] = self.beta_s
-        h5_group.attrs["gamma_1"] = self.gamma_1
-        h5_group.attrs["gamma_2"] = self.gamma_2
-        h5_group.attrs["epsilon"] = self.epsilon
         if self.conductivity is not None:
             h5_group.attrs["conductivity"] = self.conductivity
+        model_group = h5_group.create_group("model")
+        model_group.attrs["type"] = self.model.__class__.__name__
+        model_group.attrs["schema_version"] = 2
+        for field in dataclasses.fields(self.model):
+            model_group.attrs[field.name] = getattr(self.model, field.name)
 
     @staticmethod
     def from_hdf5(h5_group: h5py.Group) -> "Layer":
@@ -126,30 +106,107 @@ class Layer:
         Returns:
             A new :class:`tdgl.Layer` instance.
         """
-
-        def get(key, default=None):
-            if key in h5_group.attrs:
-                return h5_group.attrs[key]
-            return default
-
-        return Layer(
-            london_lambda=get("london_lambda"),
-            coherence_length=get("coherence_length"),
-            thickness=get("thickness"),
-            conductivity=get("conductivity"),
-            u=get("u", 5.79),
-            gamma=get("gamma", 10.0),
-            z0=get("z0", 0.0),
-            gamma_d=get("gamma_d", 1.0),
-            gamma_s=get("gamma_s", 1.0),
-            alpha_d=get("alpha_d", 1.0),
-            alpha_s=get("alpha_s", 1.0),
-            beta_d=get("beta_d", 1.0),
-            beta_s=get("beta_s", 1.0),
-            gamma_1=get("gamma_1", 0.0),
-            gamma_2=get("gamma_2", 0.0),
-            epsilon=get("epsilon", 0.0),
+        kwargs = dict(
+            london_lambda=h5_group.attrs["london_lambda"],
+            coherence_length=h5_group.attrs["coherence_length"],
+            thickness=h5_group.attrs["thickness"],
+            u=h5_group.attrs.get("u", 5.79),
         )
+        if "conductivity" in h5_group.attrs:
+            kwargs["conductivity"] = h5_group.attrs["conductivity"]
+        if "z0" in h5_group.attrs:
+            kwargs["z0"] = h5_group.attrs["z0"]
+
+        if "model" in h5_group:
+            model_group = h5_group["model"]
+            model_type = model_group.attrs.get("type", "SPlusDModel")
+            if isinstance(model_type, bytes):
+                model_type = model_type.decode()
+            model_classes = {
+                "SingleBandModel": SingleBandModel,
+                "SPlusDModel": SPlusDModel,
+                "DPlusDPrimeModel": DPlusDPrimeModel,
+                "SPlusSModel": SPlusSModel,
+            }
+            if model_type not in model_classes:
+                raise ValueError(f"Unknown superconducting model type {model_type!r}.")
+            model_cls = model_classes[model_type]
+
+            if model_cls is SPlusDModel and "eta_s" not in model_group.attrs:
+                # Migrate the first s+d API to the canonical dimensionless names.
+                # The old gamma_1 was the complete cross-density coefficient,
+                # whereas the canonical parameter is tau3/2.
+                model_kwargs = dict(
+                    eta_s=model_group.attrs.get("eta1", 1.0),
+                    eta_v=model_group.attrs.get("epsilon", 0.0),
+                    nu=model_group.attrs.get("alpha1", -1.0),
+                    tau1=model_group.attrs.get("beta1", 1.0),
+                    tau3=2 * model_group.attrs.get("gamma_1", 0.0),
+                    tau4=model_group.attrs.get("gamma_2", 0.0),
+                    beta_em=model_group.attrs.get("beta_em", 1.0),
+                )
+            elif model_cls is SPlusSModel and "a1" not in model_group.attrs:
+                # Migrate the experimental pre-schema s+s representation.
+                # It used +alpha_n in the TDGL RHS, 1/mass_ratio_2 as the
+                # second-band stiffness, and -gamma_j for the scalar coupling.
+                mass_ratio_2 = model_group.attrs.get("mass_ratio_2", 1.0)
+                if mass_ratio_2 <= 0:
+                    raise ValueError(
+                        "Legacy SPlusSModel.mass_ratio_2 must be positive."
+                    )
+                warnings.warn(
+                    "Migrating legacy SPlusSModel coefficients to the canonical "
+                    "free-energy convention.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                model_kwargs = dict(
+                    a1=-model_group.attrs.get("alpha1", 1.0),
+                    a2=-model_group.attrs.get("alpha2", 1.0),
+                    b1=model_group.attrs.get("beta1", 1.0),
+                    b2=model_group.attrs.get("beta2", 1.0),
+                    k2_over_k1=1 / mass_ratio_2,
+                    josephson_gamma=-model_group.attrs.get("gamma_j", 0.0),
+                    relaxation1=model_group.attrs.get("eta1", 1.0),
+                    relaxation2=model_group.attrs.get("eta2", 1.0),
+                    em_coupling=model_group.attrs.get("em_coupling", 1.0),
+                )
+            else:
+                model_kwargs = {}
+                for field in dataclasses.fields(model_cls):
+                    if field.name in model_group.attrs:
+                        model_kwargs[field.name] = model_group.attrs[field.name]
+            kwargs["model"] = model_cls(**model_kwargs)
+        else:
+            # Backward compatibility with both upstream single-component files
+            # and the first flat-attribute s+d format.
+            legacy_s_plus_d_fields = {
+                "gamma_d",
+                "gamma_s",
+                "alpha_d",
+                "alpha_s",
+                "beta_d",
+                "beta_s",
+                "gamma_1",
+                "gamma_2",
+                "epsilon",
+            }
+            if legacy_s_plus_d_fields.intersection(h5_group.attrs):
+                kwargs["model"] = SPlusDModel(
+                    eta_s=h5_group.attrs.get("gamma_s", 1.0),
+                    eta_v=h5_group.attrs.get("epsilon", 0.0),
+                    nu=h5_group.attrs.get("alpha_s", -1.0),
+                    tau1=h5_group.attrs.get("beta_s", 1.0),
+                    tau3=2 * h5_group.attrs.get("gamma_1", 0.0),
+                    tau4=h5_group.attrs.get("gamma_2", 0.0),
+                    beta_em=h5_group.attrs.get("beta_em", 1.0),
+                )
+            else:
+                kwargs["model"] = SingleBandModel(
+                    gamma=h5_group.attrs.get("gamma", 10.0)
+                )
+
+        return Layer(**kwargs)
 
     def __eq__(self, other):
         if self is other:
@@ -164,17 +221,8 @@ class Layer:
             and self.thickness == other.thickness
             and self.conductivity == other.conductivity
             and self.u == other.u
-            and self.gamma == other.gamma
+            and self.model == other.model
             and self.z0 == other.z0
-            and self.gamma_d == other.gamma_d
-            and self.gamma_s == other.gamma_s
-            and self.alpha_d == other.alpha_d
-            and self.alpha_s == other.alpha_s
-            and self.beta_d == other.beta_d
-            and self.beta_s == other.beta_s
-            and self.gamma_1 == other.gamma_1
-            and self.gamma_2 == other.gamma_2
-            and self.epsilon == other.epsilon
         )
 
     def __repr__(self) -> str:
@@ -184,17 +232,7 @@ class Layer:
             f"coherence_length={self.coherence_length}, "
             f"thickness={self.thickness}, "
             f"conductivity={self.conductivity}, "
-            f"u={self.u}, "
-            f"gamma={self.gamma}, "
+            f"u={self.u}, model={self.model}, "
             f"z0={self.z0}, "
-            f"gamma_d={self.gamma_d}, "
-            f"gamma_s={self.gamma_s}, "
-            f"alpha_d={self.alpha_d}, "
-            f"alpha_s={self.alpha_s}, "
-            f"beta_d={self.beta_d}, "
-            f"beta_s={self.beta_s}, "
-            f"gamma_1={self.gamma_1}, "
-            f"gamma_2={self.gamma_2}, "
-            f"epsilon={self.epsilon}"
             f")"
         )

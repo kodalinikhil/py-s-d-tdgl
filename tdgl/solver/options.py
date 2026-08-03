@@ -1,3 +1,4 @@
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from typing import Union
@@ -61,9 +62,8 @@ class SolverOptions:
             step.
         screening_step_size: Step size :math:`\\alpha` for Polyak's method.
         screening_step_drag: Drag parameter :math:`\\beta` for Polyak's method.
-        simulate_d_wave: Whether to simulate the d-wave order parameter. If False,
-            the d-wave component is kept exactly at zero, effectively resulting in a 
-            standard single-band s-wave simulation.
+        simulate_d_wave: Deprecated and ignored. Select the equation set with
+            ``Layer(model=...)``.
     """
 
     solve_time: float
@@ -90,9 +90,16 @@ class SolverOptions:
     screening_tolerance: float = 1e-3
     screening_step_size: float = 0.1
     screening_step_drag: float = 0.5
-    simulate_d_wave: bool = True
+    simulate_d_wave: Union[bool, None] = None
 
     def validate(self) -> None:
+        if self.simulate_d_wave is not None:
+            warnings.warn(
+                "SolverOptions.simulate_d_wave is ignored; select SPlusDModel "
+                "or SingleBandModel on Layer(model=...).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         if self.dt_init > self.dt_max:
             raise SolverOptionsError("dt_init must be less than or equal to dt_max.")
 

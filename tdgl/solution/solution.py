@@ -19,6 +19,7 @@ from scipy import interpolate
 from .. import distance
 from ..about import version_dict
 from ..device.device import Device
+from ..device.models import DPlusDPrimeModel, SPlusDModel, SPlusSModel
 from ..device.polygon import Polygon
 from ..em import biot_savart_2d, convert_field
 from ..finite_volume.operators import build_gradient
@@ -428,10 +429,68 @@ class Solution:
             J = J * self.device.ureg(units)
         return J
 
+    def get_order_parameter(
+        self,
+        component: Union[Literal["psi1", "psi2", "s", "d", "d_prime"], int] = "psi1",
+    ) -> np.ndarray:
+        """Return one condensate component in dimensionless units.
+
+        ``"s"`` and ``"d"`` are compatibility names for ``SPlusDModel``.
+        For ``DPlusDPrimeModel``, ``"d"`` and ``"d_prime"`` select the
+        :math:`d_{x^2-y^2}` and :math:`d_{xy}` components. Band-numbered names
+        are unambiguous for ``SPlusSModel``.
+        """
+        if component in ("psi1", 1):
+            return self.tdgl_data.psi1
+        if component in ("psi2", 2):
+            return self.tdgl_data.psi2
+        if component == "s":
+            if isinstance(self.device.layer.model, SPlusSModel):
+                raise ValueError(
+                    "Both SPlusSModel components are s-wave; use 'psi1' or 'psi2'."
+                )
+            if isinstance(self.device.layer.model, DPlusDPrimeModel):
+                raise ValueError("DPlusDPrimeModel has no s-wave component.")
+            return self.tdgl_data.psi1
+        if component == "d":
+            if isinstance(self.device.layer.model, DPlusDPrimeModel):
+                return self.tdgl_data.psi1
+            if isinstance(self.device.layer.model, SPlusDModel):
+                return self.tdgl_data.psi2
+            raise ValueError(
+                "The 'd' component exists only for SPlusDModel and " "DPlusDPrimeModel."
+            )
+        if component == "d_prime":
+            if not isinstance(self.device.layer.model, DPlusDPrimeModel):
+                raise ValueError(
+                    "The 'd_prime' component exists only for DPlusDPrimeModel."
+                )
+            return self.tdgl_data.psi2
+        raise ValueError(
+            "component must be 'psi1', 'psi2', 1, 2, 's', 'd', or 'd_prime' "
+            f"(got {component!r})."
+        )
+
+    @property
+    def orbital_magnetization(self) -> Union[np.ndarray, None]:
+        """Dimensionless orbital magnetization of a ``DPlusDPrimeModel``.
+
+        This is :math:`m_z=i g_Z(d^*d'-d d'^*)`, so the orbital Zeeman energy
+        is :math:`-m_z b`. Returns ``None`` for other models.
+        """
+        model = self.device.layer.model
+        if not isinstance(model, DPlusDPrimeModel):
+            return None
+        d = self.tdgl_data.psi1
+        d_prime = self.tdgl_data.psi2
+        chirality = np.conj(d) * d_prime - d * np.conj(d_prime)
+        return np.real(1j * model.zeeman_coupling * chirality)
+
     def interp_order_parameter(
         self,
         positions: np.ndarray,
         method: Literal["linear", "cubic"] = "linear",
+        component: Union[Literal["psi1", "psi2", "s", "d", "d_prime"], int] = "psi1",
     ) -> np.ndarray:
         """Interpolates the order parameter at unstructured coordinates.
 
@@ -439,6 +498,8 @@ class Solution:
             positions: Shape ``(m, 2)`` array of x, y coordinates at which to evaluate
                 the order parameter.
             method: Interpolation method to use, ``"linear"`` or ``"cubic"``.
+            component: Condensate component to interpolate. Use ``"psi1"`` or
+                ``"psi2"`` for model-independent access.
 
         Returns:
             The interpolated order parameter.
@@ -454,7 +515,7 @@ class Solution:
         }[method]
         positions = np.atleast_2d(positions)
         tri = self.device.triangulation
-        psi = self.tdgl_data.psi
+        psi = self.get_order_parameter(component)
         psi_interp_real = interp_type(tri, psi.real)
         psi_interp_imag = interp_type(tri, psi.imag)
         psi_real = psi_interp_real(positions[:, 0], positions[:, 1]).data
@@ -591,7 +652,9 @@ class Solution:
         )
 
     def boundary_phases(
-        self, delta: bool = False
+        self,
+        delta: bool = False,
+        component: Union[Literal["psi1", "psi2", "s", "d", "d_prime"], int] = "psi1",
     ) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
         """Returns a dict of ``{polygon_name: (boundary_indices, boundary_phases)}``.
 
@@ -604,13 +667,14 @@ class Solution:
 
         Args:
             delta: If True, ``boundary_phases[0]`` will be subtracted for each polygon.
+            component: Condensate component whose phase is returned.
 
         Returns:
             ``{polygon_name: (boundary_indices, boundary_phases)}``
         """
         device = self.device
         boundary_indices = device.boundary_sites()
-        psi = self.tdgl_data.psi
+        psi = self.get_order_parameter(component)
         theta = np.angle(psi)
         phases = {}
         for name, indices in boundary_indices.items():
