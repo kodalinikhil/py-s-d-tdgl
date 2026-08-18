@@ -1,26 +1,26 @@
 """Reproduce the field-driven d+d' -> pure-d transition of Lei et al.
 
-The source calculation is arXiv:cond-mat/0004227v1.  It minimizes Eq. (2)
-with no orbital-Zeeman coupling, treats the induction as uniform, and uses a
-magnetic-periodic vortex-lattice unit cell.  This script uses the same free
-energy and uniform-induction approximation, but it runs on a finite square
-with natural (open) boundaries because magnetic-periodic boundaries are not
-yet implemented by this solver.  Comparisons with the paper are therefore
-qualitative until domain- and mesh-convergence checks have been performed.
+The source calculation is arXiv:cond-mat/0004227v1. It minimizes Eq. (2) with
+no orbital-Zeeman coupling in a magnetic-periodic vortex-lattice unit cell and
+holds the induction uniform. This driver now uses that same geometry and
+fixed-background approximation directly: every positive ``b = B / Bc2`` is a
+one-flux torus of area ``2 pi / b``, while ``b = 0`` uses a separate zero-flux
+torus. The complete torus is bulk; there is no boundary strip.
 
-For every alpha the script starts from the mixed state at low field and sweeps
-``b = B / Bc2`` upward.  By default it stops after the mixed-to-pure crossing
-has been confirmed at two consecutive field points; a full return sweep is an
-opt-in diagnostic rather than part of the paper's primary reproduction.  It
-writes one HDF5 solution per point, crash-resilient CSV summaries, and three
-plots:
+Each field point starts independently from a common-vortex mixed ``d+d'``
+seed. In particular, fields whose physical cell sizes differ are never seeded
+blindly from one another. By default an upward scan stops after the
+mixed-to-pure crossing has been confirmed at two consecutive points; a return
+sweep remains an opt-in diagnostic. The script writes one model-neutral
+schema-v2 magnetic-periodic HDF5 solution per point, crash-resilient CSV
+summaries, and three plots:
 
 * ``phase_diagram.png`` compares numerical transition brackets with Eqs. (8)
   and (9) of the paper;
 * ``amplitude_vs_field.png`` shows the collapse of the bulk d' amplitude;
 * ``figure2_style.png`` transposes the same data to mimic the axes of Fig. 2.
 
-The default scan is deliberately substantial.  Use ``--smoke-test`` to check
+The default scan is deliberately substantial. Use ``--smoke-test`` to check
 the workflow quickly before launching a converged calculation.
 """
 
@@ -28,12 +28,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import json
 import math
 import shutil
 import sys
+from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Sequence
 
 import h5py
 import matplotlib
@@ -42,7 +44,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.optimize import brentq
-
+from scipy.sparse.linalg import eigsh
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -50,21 +52,32 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 import tdgl  # noqa: E402
 
-
 PAPER_ALPHA_STAR = 1 / 3
 PAPER_HIGH_FIELD_ALPHA_MIN = 2 / 3
 PAPER_BC2 = 1.0
 MANIFEST_NAME = "scan_manifest.json"
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 MAX_GRID_POINTS = 1_000_000
+POSITIVE_FIELD_FLUX_QUANTA = 1
+ZERO_FIELD_FLUX_QUANTA = 0
+# At zero field the homogeneous minimum is independent of cell size. A compact
+# reference torus avoids introducing a second geometry knob into the CLI.
+ZERO_FIELD_CELL_AREA = 2 * math.pi
+MAGNETIC_PERIODIC_BACKEND = "magnetic_periodic"
+FIXED_BACKGROUND_CONTROL = "fixed_uniform_background"
+DIMENSIONLESS_FIELD_UNITS = "B_c2"
+_VORTEX_MODE_CACHE: dict[tuple[int, int, float], np.ndarray] = {}
 
 MEASUREMENT_FIELDS = [
     "alpha",
     "direction",
     "sequence_index",
     "reduced_field",
-    "applied_field",
-    "field_units",
+    "backend",
+    "field_control",
+    "mean_reduced_induction",
+    "flux_quanta",
+    "vortex_count",
     "bulk_max_abs_d",
     "bulk_mean_abs_d",
     "max_abs_d_prime",
@@ -76,6 +89,9 @@ MEASUREMENT_FIELDS = [
     "bulk_relative_phase_coherence",
     "free_energy",
     "free_energy_per_area",
+    "condensate_free_energy_density",
+    "helmholtz_free_energy_density",
+    "magnetic_free_energy_density",
     "saved_frame_max_density_change",
     # Deprecated compatibility alias. This diagnostic depends on save cadence
     # and is not the solver's equilibrium criterion.
@@ -88,10 +104,14 @@ MEASUREMENT_FIELDS = [
     "equilibrium_error",
     "num_saved_states",
     "num_sites",
-    "num_elements",
-    "width",
-    "max_edge_length",
-    "boundary_strip",
+    "cell_length_x",
+    "cell_length_y",
+    "cell_area",
+    "cell_aspect_ratio",
+    "grid_nx",
+    "grid_ny",
+    "hx",
+    "hy",
     "solve_time",
     "wall_seconds",
     "output_file",
@@ -178,9 +198,7 @@ def validate_scan_arguments(
     if np.any(thresholds <= 0):
         raise ValueError("Amplitude thresholds must be positive.")
 
-    width = _require_finite("--width", args.width)
-    edge_length = _require_finite("--max-edge-length", args.max_edge_length)
-    boundary_strip = _require_finite("--boundary-strip", args.boundary_strip)
+    aspect_ratio = _require_finite("--aspect-ratio", args.aspect_ratio)
     solve_time = _require_finite("--solve-time", args.solve_time)
     dt_init = _require_finite("--dt-init", args.dt_init)
     dt_max = _require_finite("--dt-max", args.dt_max)
@@ -191,14 +209,28 @@ def validate_scan_arguments(
     normal_floor = _require_finite(
         "--normal-state-threshold", args.normal_state_threshold
     )
-    if width <= 0 or edge_length <= 0:
-        raise ValueError("--width and --max-edge-length must be positive.")
-    if not 0 <= boundary_strip < width / 2:
-        raise ValueError("--boundary-strip must satisfy 0 <= strip < width / 2.")
+    if aspect_ratio <= 0:
+        raise ValueError("--aspect-ratio must be positive.")
+    grid_points = args.grid_points
+    if (
+        isinstance(grid_points, bool)
+        or not isinstance(grid_points, (int, np.integer))
+        or grid_points < 3
+    ):
+        raise ValueError("--grid-points must be an integer of at least 3.")
+    if grid_points**2 > MAX_GRID_POINTS:
+        raise ValueError(
+            f"The N x N grid may contain at most {MAX_GRID_POINTS:,} points."
+        )
     if solve_time <= 0 or dt_init <= 0 or dt_max <= 0 or dt_init > dt_max:
         raise ValueError(
             "--solve-time, --dt-init, and --dt-max must be positive, with "
             "dt-init <= dt-max."
+        )
+    if not args.adaptive and dt_init != dt_max:
+        raise ValueError(
+            "Fixed-step mode requires --dt-init == --dt-max; pass --adaptive "
+            "to allow a distinct maximum step."
         )
     if equilibrium_min_time < 0 or equilibrium_min_time > solve_time:
         raise ValueError(
@@ -215,23 +247,18 @@ def validate_scan_arguments(
             "--phase-amplitude-floor must be nonnegative and "
             "--normal-state-threshold must be positive."
         )
-    for option in (
-        "smooth",
-        "save_every",
-        "progress_interval",
-        "equilibrium_window",
-    ):
+    for option in ("save_every", "progress_interval", "equilibrium_window"):
         value = getattr(args, option)
-        minimum = 0 if option == "smooth" else 1
         if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
             raise ValueError(f"--{option.replace('_', '-')} must be an integer.")
-        if value < minimum:
-            qualifier = "nonnegative" if minimum == 0 else "positive"
-            raise ValueError(f"--{option.replace('_', '-')} must be {qualifier}.")
-    if args.stop_after_pure_points < 0:
+        if value < 1:
+            raise ValueError(f"--{option.replace('_', '-')} must be positive.")
+    if (
+        isinstance(args.stop_after_pure_points, bool)
+        or not isinstance(args.stop_after_pure_points, (int, np.integer))
+        or args.stop_after_pure_points < 0
+    ):
         raise ValueError("--stop-after-pure-points must be nonnegative.")
-    if not str(args.field_units).strip():
-        raise ValueError("--field-units cannot be empty.")
     if not str(args.output_directory).strip():
         raise ValueError("--output-directory cannot be empty.")
 
@@ -253,57 +280,33 @@ def paper_high_field_transition(alpha: float) -> float:
     return float((1 + math.sqrt(discriminant)) / 2)
 
 
-def interior_mask(mesh, width: float, boundary_strip: float) -> np.ndarray:
-    """Select sites at least ``boundary_strip`` from the square boundary."""
-    distance = width / 2 - np.max(np.abs(mesh.sites), axis=1)
-    mask = distance >= boundary_strip
-    if not np.any(mask):
-        raise ValueError(
-            "The boundary strip excludes every mesh site; reduce --boundary-strip "
-            "or increase --width."
-        )
-    return mask
-
-
-def area_average(values: np.ndarray, areas: np.ndarray, mask: np.ndarray) -> float:
-    return float(np.average(np.asarray(values)[mask], weights=areas[mask]))
-
-
 def circular_relative_phase(
     d: np.ndarray,
     d_prime: np.ndarray,
-    areas: np.ndarray,
-    mask: np.ndarray,
     amplitude_floor: float,
 ) -> tuple[float, float]:
-    """Area-weighted mean phase and coherence of ``arg(d') - arg(d)``."""
+    """Torus mean phase and coherence of ``arg(d') - arg(d)``."""
     cross = d_prime * np.conj(d)
-    valid = mask & (np.abs(d) >= amplitude_floor) & (np.abs(d_prime) >= amplitude_floor)
+    valid = (np.abs(d) >= amplitude_floor) & (np.abs(d_prime) >= amplitude_floor)
     if not np.any(valid):
         return math.nan, math.nan
     unit_cross = cross[valid] / np.abs(cross[valid])
-    mean = np.average(unit_cross, weights=areas[valid])
+    mean = np.mean(unit_cross)
     if not abs(mean):
         return math.nan, 0.0
     return float(np.angle(mean)), float(abs(mean))
 
 
-def saved_frame_density_change(solution: tdgl.Solution) -> float:
+def saved_frame_density_change(solution: tdgl.MagneticPeriodicSolution) -> float:
     """Amplitude-squared change between saved frames (not a convergence test)."""
-    with h5py.File(solution.path, "r") as h5file:
-        steps = sorted(int(step) for step in h5file["data"])
-    if len(steps) < 2:
+    if solution.num_frames < 2:
         return math.nan
-
-    final_step = steps[-1]
-    previous_step = steps[-2]
-    solution.solve_step = final_step
-    final1 = np.abs(solution.tdgl_data.psi1) ** 2
-    final2 = np.abs(solution.tdgl_data.psi2) ** 2
-    solution.solve_step = previous_step
-    previous1 = np.abs(solution.tdgl_data.psi1) ** 2
-    previous2 = np.abs(solution.tdgl_data.psi2) ** 2
-    solution.solve_step = final_step
+    final = solution.frame(-1)
+    previous = solution.frame(-2)
+    final1 = np.abs(final.psi1) ** 2
+    final2 = np.abs(final.psi2) ** 2
+    previous1 = np.abs(previous.psi1) ** 2
+    previous2 = np.abs(previous.psi2) ** 2
     return float(
         max(
             np.max(np.abs(final1 - previous1)),
@@ -312,7 +315,7 @@ def saved_frame_density_change(solution: tdgl.Solution) -> float:
     )
 
 
-def final_density_change(solution: tdgl.Solution) -> float:
+def final_density_change(solution: tdgl.MagneticPeriodicSolution) -> float:
     """Compatibility alias for :func:`saved_frame_density_change`."""
     return saved_frame_density_change(solution)
 
@@ -339,66 +342,60 @@ def classify_state(
     return "d_prime_dominant"
 
 
-def run_diagnostics(solution: tdgl.Solution) -> dict:
+def run_diagnostics(solution: tdgl.MagneticPeriodicSolution) -> dict:
     """Return convergence metadata stored with the final solver state."""
-    solution.solve_step = -1
-    state = solution.tdgl_data.state or {}
-    with h5py.File(solution.path, "r") as h5file:
-        num_saved_states = len(h5file["data"])
+    state = solution.state
     equilibrium_error = float(state.get("equilibrium_error", math.nan))
     check_enabled = solution.options.equilibrium_tolerance is not None
     reached = bool(state.get("equilibrium_reached", False)) if check_enabled else None
     return {
-        "actual_solve_time": float(state.get("time", math.nan)),
-        "accepted_steps": int(state.get("step", -1)),
+        "actual_solve_time": float(solution.final_time),
+        "accepted_steps": int(solution.final_step),
         "equilibrium_check_enabled": check_enabled,
         "equilibrium_reached": reached,
         "equilibrium_status": (
             ("reached" if reached else "time_cap") if check_enabled else "not_requested"
         ),
         "equilibrium_error": equilibrium_error,
-        "num_saved_states": num_saved_states,
+        "num_saved_states": int(solution.num_frames),
     }
 
 
 def measure_solution(
-    solution: tdgl.Solution,
-    solver: tdgl.TDGLSolver,
+    solution: tdgl.MagneticPeriodicSolution,
     *,
     alpha: float,
     direction: str,
     sequence_index: int,
     reduced_field: float,
-    applied_field: float,
-    field_units: str,
-    width: float,
-    max_edge_length: float,
-    boundary_strip: float,
     solve_time: float,
     phase_amplitude_floor: float,
     state_amplitude_threshold: float,
     normal_state_threshold: float,
 ) -> dict:
-    solution.solve_step = -1
-    mesh = solution.device.mesh
-    d = solution.get_order_parameter("d")
-    d_prime = solution.get_order_parameter("d_prime")
-    bulk = interior_mask(mesh, width, boundary_strip)
-    bulk_max_d = float(np.max(np.abs(d[bulk])))
-    bulk_mean_d = area_average(np.abs(d), mesh.areas, bulk)
+    cell = solution.cell
+    if solution.component_names != ("d", "d_prime"):
+        raise RuntimeError(
+            "Expected schema-v2 d+d' components ('d', 'd_prime'), found "
+            f"{solution.component_names!r}."
+        )
+    d = solution.psi_d
+    d_prime = solution.psi_d_prime
+    bulk_max_d = float(np.max(np.abs(d)))
+    bulk_mean_d = float(np.mean(np.abs(d)))
     max_d_prime = float(np.max(np.abs(d_prime)))
-    bulk_max_d_prime = float(np.max(np.abs(d_prime[bulk])))
-    bulk_mean_d_prime = area_average(np.abs(d_prime), mesh.areas, bulk)
+    bulk_max_d_prime = max_d_prime
+    bulk_mean_d_prime = float(np.mean(np.abs(d_prime)))
     zero_field_d_prime = math.sqrt(3 * (3 * alpha - 1) / 8)
     phase, phase_coherence = circular_relative_phase(
         d,
         d_prime,
-        mesh.areas,
-        bulk,
         amplitude_floor=phase_amplitude_floor,
     )
-    free_energy = solver.compute_d_plus_d_prime_free_energy(d, d_prime)
-    area = float(np.sum(mesh.areas))
+    condensate_density = float(solution.free_energy_density(include_magnetic=False))
+    helmholtz_density = float(solution.free_energy_density(include_magnetic=True))
+    magnetic_density = helmholtz_density - condensate_density
+    free_energy = condensate_density * cell.dimensionless_area
     diagnostics = run_diagnostics(solution)
     saved_frame_change = saved_frame_density_change(solution)
     row = {
@@ -406,8 +403,11 @@ def measure_solution(
         "direction": direction,
         "sequence_index": sequence_index,
         "reduced_field": reduced_field,
-        "applied_field": applied_field,
-        "field_units": field_units,
+        "backend": MAGNETIC_PERIODIC_BACKEND,
+        "field_control": FIXED_BACKGROUND_CONTROL,
+        "mean_reduced_induction": solution.mean_induction,
+        "flux_quanta": cell.flux_quanta,
+        "vortex_count": solution.vortex_count,
         "bulk_max_abs_d": bulk_max_d,
         "bulk_mean_abs_d": bulk_mean_d,
         "max_abs_d_prime": max_d_prime,
@@ -418,15 +418,23 @@ def measure_solution(
         "bulk_relative_phase": phase,
         "bulk_relative_phase_coherence": phase_coherence,
         "free_energy": free_energy,
-        "free_energy_per_area": free_energy / area,
+        "free_energy_per_area": condensate_density,
+        "condensate_free_energy_density": condensate_density,
+        "helmholtz_free_energy_density": helmholtz_density,
+        "magnetic_free_energy_density": magnetic_density,
         "saved_frame_max_density_change": saved_frame_change,
         "convergence_max_density_change": saved_frame_change,
         **diagnostics,
-        "num_sites": len(mesh.sites),
-        "num_elements": len(mesh.elements),
-        "width": width,
-        "max_edge_length": max_edge_length,
-        "boundary_strip": boundary_strip,
+        "num_sites": cell.num_sites,
+        "cell_length_x": cell.dimensionless_lengths[0],
+        "cell_length_y": cell.dimensionless_lengths[1],
+        "cell_area": cell.dimensionless_area,
+        "cell_aspect_ratio": cell.dimensionless_lengths[0]
+        / cell.dimensionless_lengths[1],
+        "grid_nx": cell.nx,
+        "grid_ny": cell.ny,
+        "hx": cell.hx,
+        "hy": cell.hy,
         "solve_time": solve_time,
         "wall_seconds": solution.total_seconds,
         "output_file": str(Path("h5") / Path(solution.path).name),
@@ -443,7 +451,9 @@ def validate_measurement(row: dict) -> None:
     required_finite = (
         "alpha",
         "reduced_field",
-        "applied_field",
+        "mean_reduced_induction",
+        "flux_quanta",
+        "vortex_count",
         "bulk_max_abs_d",
         "bulk_mean_abs_d",
         "max_abs_d_prime",
@@ -452,11 +462,20 @@ def validate_measurement(row: dict) -> None:
         "normalized_bulk_max_abs_d_prime",
         "free_energy",
         "free_energy_per_area",
+        "condensate_free_energy_density",
+        "helmholtz_free_energy_density",
+        "magnetic_free_energy_density",
         "actual_solve_time",
         "wall_seconds",
-        "width",
-        "max_edge_length",
-        "boundary_strip",
+        "num_sites",
+        "cell_length_x",
+        "cell_length_y",
+        "cell_area",
+        "cell_aspect_ratio",
+        "grid_nx",
+        "grid_ny",
+        "hx",
+        "hy",
         "solve_time",
     )
     invalid = []
@@ -471,6 +490,10 @@ def validate_measurement(row: dict) -> None:
         raise RuntimeError(
             "Cannot record a nonfinite measurement: " + ", ".join(invalid)
         )
+    if row.get("backend") != MAGNETIC_PERIODIC_BACKEND:
+        raise RuntimeError("Measurement does not use the magnetic-periodic backend.")
+    if row.get("field_control") != FIXED_BACKGROUND_CONTROL:
+        raise RuntimeError("Measurement does not use the fixed uniform background.")
     classification = row.get("state_classification")
     if classification not in {"mixed", "pure_d", "normal", "d_prime_dominant"}:
         raise RuntimeError(
@@ -664,16 +687,29 @@ def write_csv(path: Path, rows: Sequence[dict], fieldnames: Sequence[str]) -> No
 def scan_configuration(args, alphas, fields, thresholds) -> dict:
     """Return the calculation-defining configuration stored for ``--resume``."""
     return {
+        "backend": {
+            "name": MAGNETIC_PERIODIC_BACKEND,
+            "solution_schema_version": 2,
+            "field_control": FIXED_BACKGROUND_CONTROL,
+            "include_screening": False,
+            "positive_field_flux_quanta": POSITIVE_FIELD_FLUX_QUANTA,
+            "zero_field_flux_quanta": ZERO_FIELD_FLUX_QUANTA,
+            "zero_field_cell_area": ZERO_FIELD_CELL_AREA,
+        },
+        "model": {
+            "type": "DPlusDPrimeModel",
+            "zeeman_coupling": 0.0,
+        },
+        "seed_policy": "independent_common_vortex_mixed",
         "alphas": [float(value) for value in alphas],
         "fields": [float(value) for value in fields],
         "thresholds": [float(value) for value in thresholds],
-        "width": float(args.width),
-        "max_edge_length": float(args.max_edge_length),
-        "boundary_strip": float(args.boundary_strip),
-        "smooth": int(args.smooth),
+        "grid_points": int(args.grid_points),
+        "aspect_ratio": float(args.aspect_ratio),
         "solve_time": float(args.solve_time),
         "dt_init": float(args.dt_init),
         "dt_max": float(args.dt_max),
+        "adaptive": bool(args.adaptive),
         "save_every": int(args.save_every),
         "progress_interval": int(args.progress_interval),
         "equilibrium_tolerance": (
@@ -683,7 +719,7 @@ def scan_configuration(args, alphas, fields, thresholds) -> dict:
         ),
         "equilibrium_window": int(args.equilibrium_window),
         "equilibrium_min_time": float(args.equilibrium_min_time),
-        "field_units": str(args.field_units),
+        "field_units": DIMENSIONLESS_FIELD_UNITS,
         "phase_amplitude_floor": float(args.phase_amplitude_floor),
         "normal_state_threshold": float(args.normal_state_threshold),
         "down_sweep": bool(args.down_sweep),
@@ -784,65 +820,103 @@ def read_measurements(path: Path) -> list[dict]:
         return list(reader)
 
 
+def _options_payload(options: tdgl.SolverOptions) -> dict:
+    """Return an exact JSON-like representation for resume comparisons."""
+    payload = dataclasses.asdict(options)
+    return {
+        name: value.value if isinstance(value, Enum) else value
+        for name, value in payload.items()
+    }
+
+
 def validate_checkpoint(
-    solution: tdgl.Solution,
+    solution: tdgl.MagneticPeriodicSolution,
     *,
-    device,
+    cell: tdgl.MagneticPeriodicCell,
     args,
-    alpha: float,
     output_file: Path,
 ) -> None:
-    """Reject stale, incompatible, or interrupted HDF5 checkpoints."""
-    saved_mesh = solution.device.mesh
-    expected_mesh = device.mesh
-    same_mesh = (
-        saved_mesh.sites.shape == expected_mesh.sites.shape
-        and saved_mesh.elements.shape == expected_mesh.elements.shape
-        and np.allclose(saved_mesh.sites, expected_mesh.sites, rtol=0, atol=1e-13)
-        and np.array_equal(saved_mesh.elements, expected_mesh.elements)
-    )
-    expected_model = tdgl.DPlusDPrimeModel(alpha=alpha, zeeman_coupling=0.0)
-    if not same_mesh or solution.device.layer.model != expected_model:
+    """Reject stale, incompatible, or interrupted periodic checkpoints."""
+    if solution.cell != cell:
         raise RuntimeError(
-            f"Checkpoint {output_file} does not match the requested mesh/model."
+            f"Checkpoint {output_file} does not match the exact requested "
+            "cell/model/flux sector."
         )
-    options = solution.options
-    expected_options = {
-        "solve_time": args.solve_time,
-        "dt_init": args.dt_init,
-        "dt_max": args.dt_max,
-        "save_every": args.save_every,
-        "progress_interval": args.progress_interval,
-        "equilibrium_tolerance": args.equilibrium_tolerance,
-        "equilibrium_window": args.equilibrium_window,
-        "equilibrium_min_time": args.equilibrium_min_time,
-    }
-    for name, expected in expected_options.items():
-        saved = getattr(options, name)
-        if saved is None or expected is None:
-            matches = saved is expected
-        elif isinstance(expected, int):
-            matches = int(saved) == expected
-        else:
-            matches = math.isclose(
-                float(saved), float(expected), rel_tol=1e-12, abs_tol=1e-14
-            )
-        if not matches:
+    expected_options = make_solver_options(args, output_file)
+    saved_payload = _options_payload(solution.options)
+    expected_payload = _options_payload(expected_options)
+    if saved_payload != expected_payload:
+        differing = sorted(
+            name
+            for name in set(saved_payload) | set(expected_payload)
+            if saved_payload.get(name) != expected_payload.get(name)
+        )
+        raise RuntimeError(
+            f"Checkpoint {output_file} has incompatible solver options: "
+            + ", ".join(differing)
+        )
+    if solution.component_names != ("d", "d_prime"):
+        raise RuntimeError(
+            f"Checkpoint {output_file} does not use d+d' schema-v2 components."
+        )
+    with h5py.File(solution.path, "r") as h5file:
+        if (
+            int(h5file.attrs.get("schema_version", -1)) != 2
+            or h5file.attrs.get("backend") != MAGNETIC_PERIODIC_BACKEND
+            or h5file.attrs.get("model_type") != "DPlusDPrimeModel"
+            or h5file.attrs.get("field_control") != "fixed_background"
+        ):
             raise RuntimeError(
-                f"Checkpoint {output_file} has incompatible option {name}."
+                f"Checkpoint {output_file} has incompatible backend/schema metadata."
             )
-    if options.field_units != args.field_units or bool(options.include_screening):
-        raise RuntimeError(f"Checkpoint {output_file} has incompatible field settings.")
-    state = solution.tdgl_data.state or {}
-    final_time = float(state.get("time", math.nan))
+    final_time = float(solution.final_time)
     if not math.isfinite(final_time):
         raise RuntimeError(f"Checkpoint {output_file} has no finite final time.")
-    reached = bool(state.get("equilibrium_reached", False))
-    time_tolerance = max(1e-12, 2 * float(state.get("dt", args.dt_init)))
+    reached = bool(solution.state.get("equilibrium_reached", False))
+    time_tolerance = max(1e-12, 2 * float(solution.final_frame.dt or args.dt_init))
     if not reached and final_time + time_tolerance < args.solve_time:
         raise RuntimeError(
             f"Checkpoint {output_file} is incomplete at t={final_time:g}."
         )
+
+
+def validate_row_cell_metadata(row: dict, cell: tdgl.MagneticPeriodicCell) -> None:
+    """Require resumed CSV geometry/flux metadata to match its checkpoint cell."""
+    exact_values = {
+        "backend": MAGNETIC_PERIODIC_BACKEND,
+        "field_control": FIXED_BACKGROUND_CONTROL,
+        "flux_quanta": cell.flux_quanta,
+        "vortex_count": cell.flux_quanta,
+        "grid_nx": cell.nx,
+        "grid_ny": cell.ny,
+        "num_sites": cell.num_sites,
+    }
+    for name, expected in exact_values.items():
+        raw = row.get(name)
+        try:
+            actual = int(raw) if isinstance(expected, int) else raw
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Resume CSV has invalid {name} metadata.") from exc
+        if actual != expected:
+            raise RuntimeError(f"Resume CSV has incompatible {name} metadata.")
+    numeric_values = {
+        "mean_reduced_induction": cell.mean_induction,
+        "cell_length_x": cell.dimensionless_lengths[0],
+        "cell_length_y": cell.dimensionless_lengths[1],
+        "cell_area": cell.dimensionless_area,
+        "cell_aspect_ratio": (
+            cell.dimensionless_lengths[0] / cell.dimensionless_lengths[1]
+        ),
+        "hx": cell.hx,
+        "hy": cell.hy,
+    }
+    for name, expected in numeric_values.items():
+        try:
+            actual = float(row[name])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"Resume CSV has invalid {name} metadata.") from exc
+        if not math.isclose(actual, expected, rel_tol=0, abs_tol=1e-13):
+            raise RuntimeError(f"Resume CSV has incompatible {name} metadata.")
 
 
 def index_existing_measurements(
@@ -888,10 +962,9 @@ def load_resume_checkpoint(
     *,
     output_directory: Path,
     expected_file: Path,
-    device,
+    cell: tdgl.MagneticPeriodicCell,
     args,
-    alpha: float,
-) -> tdgl.Solution:
+) -> tdgl.MagneticPeriodicSolution:
     """Load the exact HDF5 file referenced by a validated resume row."""
     relative = Path(str(row["output_file"]))
     if relative.is_absolute() or ".." in relative.parts:
@@ -904,14 +977,14 @@ def load_resume_checkpoint(
     if not checkpoint.is_file():
         raise RuntimeError(f"Resume checkpoint is missing: {checkpoint}")
     try:
-        solution = tdgl.Solution.from_hdf5(str(checkpoint))
+        solution = tdgl.MagneticPeriodicSolution.from_hdf5(str(checkpoint))
     except Exception as exc:
         raise RuntimeError(f"Cannot load resume checkpoint {checkpoint}.") from exc
+    validate_row_cell_metadata(row, cell)
     validate_checkpoint(
         solution,
-        device=device,
+        cell=cell,
         args=args,
-        alpha=alpha,
         output_file=checkpoint,
     )
     return solution
@@ -934,6 +1007,20 @@ def plot_results(
     primary_threshold: float,
     output_directory: Path,
 ) -> None:
+    def field_coordinate(row: dict) -> float:
+        if row.get("backend") == MAGNETIC_PERIODIC_BACKEND:
+            try:
+                value = float(row["mean_reduced_induction"])
+            except (KeyError, TypeError, ValueError):
+                value = math.nan
+            if math.isfinite(value):
+                return value
+        return float(row["reduced_field"])
+
+    backends = {str(row.get("backend") or "open") for row in measurements}
+    periodic = backends == {MAGNETIC_PERIODIC_BACKEND}
+    geometry_label = "Magnetic-periodic" if periodic else "Finite-domain"
+    region_label = "torus" if periodic else "bulk"
     alphas = sorted({float(row["alpha"]) for row in measurements})
 
     fig, ax = plt.subplots(figsize=(7.2, 6.0))
@@ -981,10 +1068,15 @@ def plot_results(
                 fmt=marker,
                 color=color,
                 capsize=3,
-                label=f"Finite-square {direction} sweep",
+                label=f"{geometry_label} {direction} scan",
             )
     ax.axvline(PAPER_BC2, color="0.5", linestyle=":", label=r"$b_{c2}=1$")
     ax.set(xlim=(0, 1.02), ylim=(0, 1.02), xlabel=r"$b=B/B_{c2}$", ylabel=r"$\alpha$")
+    ax.set_title(
+        "Magnetic-periodic one-flux-cell transition"
+        if periodic
+        else "Finite-domain transition"
+    )
     ax.grid(alpha=0.25)
     ax.legend(fontsize=8)
     fig.tight_layout()
@@ -1004,7 +1096,7 @@ def plot_results(
                 key=lambda row: float(row["reduced_field"]),
             )
             if sweep:
-                fields_for_sweep = [float(row["reduced_field"]) for row in sweep]
+                fields_for_sweep = [field_coordinate(row) for row in sweep]
                 axes[0].plot(
                     fields_for_sweep,
                     [float(row["bulk_max_abs_d_prime"]) for row in sweep],
@@ -1026,7 +1118,7 @@ def plot_results(
                     if math.isfinite(float(row["bulk_relative_phase"]))
                 ]
                 axes[2].plot(
-                    [float(row["reduced_field"]) for row in phase_rows],
+                    [field_coordinate(row) for row in phase_rows],
                     [
                         abs(float(row["bulk_relative_phase"])) / math.pi
                         for row in phase_rows
@@ -1041,8 +1133,8 @@ def plot_results(
         label="transition threshold",
     )
     axes[2].axhline(0.5, color="black", linestyle=":", label=r"$\pi/2$")
-    axes[0].set_ylabel(r"bulk $\max |d'|$")
-    axes[1].set_ylabel(r"bulk mean $|d|$")
+    axes[0].set_ylabel(rf"{region_label} $\max |d'|$")
+    axes[1].set_ylabel(rf"{region_label} mean $|d|$")
     axes[2].set(xlabel=r"$b=B/B_{c2}$", ylabel=r"$|\arg(d'/d)|/\pi$")
     axes[2].set_ylim(0, 1)
     for ax in axes:
@@ -1054,7 +1146,7 @@ def plot_results(
     plt.close(fig)
 
     up_rows = [row for row in measurements if row["direction"] == "up"]
-    fields = sorted({float(row["reduced_field"]) for row in up_rows})
+    fields = sorted({field_coordinate(row) for row in up_rows})
     if len(fields) > 10:
         indices = np.unique(np.linspace(0, len(fields) - 1, 10).round().astype(int))
         fields = [fields[index] for index in indices]
@@ -1065,7 +1157,7 @@ def plot_results(
             (
                 row
                 for row in up_rows
-                if math.isclose(float(row["reduced_field"]), field, abs_tol=1e-12)
+                if math.isclose(field_coordinate(row), field, abs_tol=1e-12)
             ),
             key=lambda row: float(row["alpha"]),
         )
@@ -1077,8 +1169,8 @@ def plot_results(
             color=color,
             label=rf"$b={field:g}$",
         )
-    ax.set(xlabel=r"$\alpha$", ylabel=r"bulk $\max |d'|$")
-    ax.set_title("Finite-square analogue of paper Fig. 2")
+    ax.set(xlabel=r"$\alpha$", ylabel=rf"{region_label} $\max |d'|$")
+    ax.set_title(f"{geometry_label} analogue of paper Fig. 2")
     ax.grid(alpha=0.25)
     ax.legend(ncol=2, fontsize=7)
     fig.tight_layout()
@@ -1086,86 +1178,182 @@ def plot_results(
     plt.close(fig)
 
 
-def build_device(alpha: float, width: float, max_edge_length: float, smooth: int):
+def cell_geometry(
+    reduced_field: float, aspect_ratio: float
+) -> tuple[float, float, int]:
+    """Return ``(Lx, Ly, n)`` for a paper-style fixed-induction torus."""
+    reduced_field = _require_finite("reduced_field", reduced_field)
+    aspect_ratio = _require_finite("aspect_ratio", aspect_ratio)
+    if reduced_field < 0 or reduced_field > PAPER_BC2:
+        raise ValueError("reduced_field must lie in 0 <= b <= 1.")
+    if aspect_ratio <= 0:
+        raise ValueError("aspect_ratio must be positive.")
+    if reduced_field == 0:
+        flux_quanta = ZERO_FIELD_FLUX_QUANTA
+        area = ZERO_FIELD_CELL_AREA
+    else:
+        flux_quanta = POSITIVE_FIELD_FLUX_QUANTA
+        area = 2 * math.pi * flux_quanta / reduced_field
+    length_x = math.sqrt(area * aspect_ratio)
+    length_y = math.sqrt(area / aspect_ratio)
+    return length_x, length_y, flux_quanta
+
+
+def build_cell(
+    alpha: float,
+    reduced_field: float,
+    grid_points: int,
+    aspect_ratio: float,
+) -> tdgl.MagneticPeriodicCell:
+    """Build the exact N x N magnetic-periodic cell for one scan point."""
+    length_x, length_y, flux_quanta = cell_geometry(reduced_field, aspect_ratio)
     layer = tdgl.Layer(
         coherence_length=1.0,
         london_lambda=10.0,
         thickness=0.1,
         model=tdgl.DPlusDPrimeModel(alpha=alpha, zeeman_coupling=0.0),
     )
-    boundary_points = max(101, int(math.ceil(8 * width / max_edge_length)))
-    film = tdgl.Polygon(
-        "film", points=tdgl.geometry.box(width, width, points=boundary_points)
+    return tdgl.MagneticPeriodicCell(
+        layer=layer,
+        lengths=(length_x, length_y),
+        shape=(grid_points, grid_points),
+        flux_quanta=flux_quanta,
+        origin=(-length_x / 2, -length_y / 2),
+        length_units="um",
+        name="lei-d-plus-d-prime-vortex-cell",
     )
-    device = tdgl.Device("lei-d-plus-d-prime-square", layer=layer, film=film)
-    device.make_mesh(max_edge_length=max_edge_length, smooth=smooth)
-    return device
+
+
+def fixed_step_stability_limit(cell: tdgl.MagneticPeriodicCell) -> float:
+    """Conservative explicit diagonal-diffusion limit for the d+d' model."""
+    model = cell.layer.model
+    if not isinstance(model, tdgl.DPlusDPrimeModel):
+        raise TypeError("fixed_step_stability_limit requires DPlusDPrimeModel.")
+    relaxation = min(model.relaxation_d, model.relaxation_d_prime)
+    return float(relaxation / (2 / cell.hx**2 + 2 / cell.hy**2))
+
+
+def validate_fixed_step_stability(
+    cell: tdgl.MagneticPeriodicCell,
+    *,
+    dt: float,
+    reduced_field: float,
+) -> None:
+    """Reject a frozen-B fixed step above the discrete diffusion bound."""
+    limit = fixed_step_stability_limit(cell)
+    if dt > limit * (1 + 1e-13):
+        raise ValueError(
+            f"--dt-init={dt:g} is unstable for b={reduced_field:g}, "
+            f"hx={cell.hx:g}, hy={cell.hy:g}; fixed-step D+D' diffusion "
+            f"requires dt <= {limit:.8g}. Reduce the step/grid size or pass "
+            "--adaptive."
+        )
+
+
+def uniform_mixed_amplitudes(alpha: float) -> tuple[float, float]:
+    """Return the exact homogeneous zero-field mixed-state amplitudes."""
+    return (
+        math.sqrt(3 * (3 - alpha) / 8),
+        math.sqrt(3 * (3 * alpha - 1) / 8),
+    )
+
+
+def independent_common_vortex_seed(
+    cell: tdgl.MagneticPeriodicCell,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a fresh mixed seed with common winding in the cell's flux sector."""
+    alpha = cell.layer.model.alpha
+    d_amplitude, d_prime_amplitude = uniform_mixed_amplitudes(alpha)
+    if cell.flux_quanta == 0:
+        common_vortex = np.ones(cell.shape, dtype=complex)
+    elif cell.flux_quanta == 1:
+        # The lowest eigenmode of the discrete covariant kinetic operator is a
+        # smooth one-vortex section of the magnetic line bundle. Unlike a
+        # radial phase pasted onto a torus, it obeys the magnetic seam exactly
+        # and does not inject a large, artificial first timestep.
+        lx, ly = cell.dimensionless_lengths
+        cache_key = (cell.ny, cell.nx, round(lx / ly, 14))
+        cached = _VORTEX_MODE_CACHE.get(cache_key)
+        if cached is None:
+            operators = tdgl.MagneticPeriodicOperators(cell)
+            gradient = operators.covariant_gradient_matrix()
+            kinetic = (gradient.conj().T @ gradient).tocsc()
+            indices = np.arange(cell.num_sites, dtype=float)
+            initial_vector = 1 + 1e-3j * indices / max(cell.num_sites - 1, 1)
+            _, eigenvectors = eigsh(
+                kinetic,
+                k=1,
+                which="SA",
+                v0=initial_vector,
+                tol=1e-11,
+            )
+            cached = eigenvectors[:, 0].reshape(cell.shape)
+            anchor = cached.ravel()[np.argmax(np.abs(cached))]
+            cached = cached * np.exp(-1j * np.angle(anchor))
+            cached = cached / np.max(np.abs(cached))
+            if operators.vortex_count(cached) != cell.flux_quanta:
+                raise RuntimeError(
+                    "Lowest magnetic-periodic seed mode has the wrong winding."
+                )
+            cached.setflags(write=False)
+            _VORTEX_MODE_CACHE[cache_key] = cached
+        common_vortex = cached.copy()
+    else:  # This driver deliberately uses only zero- and one-flux cells.
+        raise ValueError("The phase scan supports only zero or one flux quantum.")
+    return (
+        d_amplitude * common_vortex,
+        -1j * d_prime_amplitude * common_vortex,
+    )
+
+
+def make_solver_options(args, output_file: Path) -> tdgl.SolverOptions:
+    """Build the complete fixed-background option set used and resumed here."""
+    return tdgl.SolverOptions(
+        solve_time=args.solve_time,
+        dt_init=args.dt_init,
+        dt_max=args.dt_max,
+        adaptive=bool(args.adaptive),
+        terminal_psi=None,
+        output_file=str(output_file.resolve()),
+        field_units=DIMENSIONLESS_FIELD_UNITS,
+        include_screening=False,
+        save_every=args.save_every,
+        progress_interval=args.progress_interval,
+        equilibrium_tolerance=args.equilibrium_tolerance,
+        equilibrium_window=args.equilibrium_window,
+        equilibrium_min_time=args.equilibrium_min_time,
+        sparse_solver="superlu",
+    )
 
 
 def solve_point(
-    device,
-    seed_solution,
+    cell: tdgl.MagneticPeriodicCell,
     *,
-    reduced_field: float,
     output_file: Path,
-    field_units: str,
-    solve_time: float,
-    dt_init: float,
-    dt_max: float,
-    save_every: int,
-    progress_interval: int,
-    equilibrium_tolerance: Optional[float],
-    equilibrium_window: int,
-    equilibrium_min_time: float,
-):
-    hc2 = device.Bc2.to(field_units).magnitude
-    applied_field = float(reduced_field * hc2)
-    options = tdgl.SolverOptions(
-        solve_time=solve_time,
-        dt_init=dt_init,
-        dt_max=dt_max,
-        adaptive=True,
-        terminal_psi=None,
-        output_file=str(output_file),
-        field_units=field_units,
-        include_screening=False,
-        save_every=save_every,
-        progress_interval=progress_interval,
-        equilibrium_tolerance=equilibrium_tolerance,
-        equilibrium_window=equilibrium_window,
-        equilibrium_min_time=equilibrium_min_time,
+    args,
+) -> tdgl.MagneticPeriodicSolution:
+    """Solve one field from a fresh same-cell mixed vortex seed."""
+    d_seed, d_prime_seed = independent_common_vortex_seed(cell)
+    solution = tdgl.solve_magnetic_periodic(
+        cell,
+        make_solver_options(args, output_file),
+        initial_psi1=d_seed,
+        initial_psi2=d_prime_seed,
     )
-    solver = tdgl.TDGLSolver(
-        device=device,
-        options=options,
-        applied_vector_potential=applied_field,
-        seed_solution=seed_solution,
-    )
-    if seed_solution is None and math.isclose(reduced_field, 0.0, abs_tol=1e-14):
-        # The paper gives the exact uniform zero-field minimum.  Starting from
-        # it avoids waiting for a 1e-4 symmetry-breaking perturbation to grow,
-        # which is especially slow when alpha is just above 1/3.
-        alpha = device.layer.model.alpha
-        d_amplitude = math.sqrt(3 * (3 - alpha) / 8)
-        d_prime_amplitude = math.sqrt(3 * (3 * alpha - 1) / 8)
-        solver.psi1_init.fill(d_amplitude)
-        solver.psi2_init.fill(-1j * d_prime_amplitude)
-    solution = solver.solve()
-    if solution is None:
-        raise RuntimeError("The solve was cancelled before producing data.")
-    return solution, solver, applied_field
+    if solution.component_names != ("d", "d_prime"):
+        raise RuntimeError("Magnetic-periodic solver did not write d+d' schema v2.")
+    return solution
 
 
 def configure_smoke_test(args) -> None:
     """Apply the tiny end-to-end preset without leaving invalid timing options."""
-    args.width = 3.0
-    args.max_edge_length = 0.8
-    args.boundary_strip = 0.4
+    args.grid_points = 8
+    args.aspect_ratio = 1.0
     args.solve_time = 0.002
-    args.dt_init = 1e-4
+    args.dt_init = 1e-3
     args.dt_max = 1e-3
+    args.adaptive = False
     args.save_every = 1
-    args.smooth = 2
     args.equilibrium_min_time = 0.0
     args.stop_after_pure_points = 0
 
@@ -1179,10 +1367,28 @@ def run_scan(args) -> tuple[list[dict], list[dict]]:
         fields = np.asarray([0.0, 0.6])
         configure_smoke_test(args)
     validate_scan_arguments(args, alphas, fields, thresholds)
-    if not np.any(np.isclose(fields, 0.0)):
+    if not np.any(fields == 0):
         fields = np.insert(fields, 0, 0.0)
     fields.sort()
     strictest_threshold = float(np.min(thresholds))
+
+    # Validate every explicit fixed step before the output manifest/directory
+    # can be created or overwritten. The most restrictive cell is generally
+    # at high field, where a fixed N x N grid has the smallest spacing.
+    if not args.adaptive:
+        for alpha in alphas:
+            for reduced_field in fields:
+                cell = build_cell(
+                    float(alpha),
+                    float(reduced_field),
+                    args.grid_points,
+                    args.aspect_ratio,
+                )
+                validate_fixed_step_stability(
+                    cell,
+                    dt=args.dt_init,
+                    reduced_field=float(reduced_field),
+                )
 
     output_directory = Path(args.output_directory).resolve()
     configuration = scan_configuration(args, alphas, fields, thresholds)
@@ -1198,14 +1404,9 @@ def run_scan(args) -> tuple[list[dict], list[dict]]:
     transitions_path = output_directory / "transitions.csv"
 
     print(
-        f"Building {args.width:g} xi square with target edge length "
-        f"{args.max_edge_length:g} xi..."
-    )
-    device = build_device(
-        float(alphas[0]), args.width, args.max_edge_length, args.smooth
-    )
-    print(
-        f"Mesh: {len(device.mesh.sites)} sites, {len(device.mesh.elements)} triangles."
+        f"Magnetic-periodic fixed-background scan: {args.grid_points} x "
+        f"{args.grid_points} sites, Lx/Ly={args.aspect_ratio:g}, "
+        f"{'adaptive' if args.adaptive else 'fixed'} timestep."
     )
     measurements = read_measurements(measurements_path) if resumed else []
     existing = index_existing_measurements(
@@ -1226,16 +1427,11 @@ def run_scan(args) -> tuple[list[dict], list[dict]]:
 
     for alpha_index, alpha in enumerate(alphas):
         alpha = float(alpha)
-        device.layer.model = tdgl.DPlusDPrimeModel(
-            alpha=alpha,
-            zeeman_coupling=0.0,
-        )
-        seed_solution = None
-        last_up_measurement = None
         alpha_up_measurements: list[dict] = []
         print(f"\nalpha={alpha:g} ({alpha_index + 1}/{len(alphas)})")
         for sequence_index, reduced_field in enumerate(fields):
             reduced_field = float(reduced_field)
+            cell = build_cell(alpha, reduced_field, args.grid_points, args.aspect_ratio)
             stem = f"alpha_{alpha:.6f}_up_{sequence_index:03d}_b_{reduced_field:.6f}.h5"
             output_file = h5_directory / stem
             key = (alpha, "up", sequence_index)
@@ -1246,40 +1442,27 @@ def run_scan(args) -> tuple[list[dict], list[dict]]:
                     row,
                     output_directory=output_directory,
                     expected_file=output_file,
-                    device=device,
+                    cell=cell,
                     args=args,
-                    alpha=alpha,
                 )
                 consumed.add(key)
             else:
-                print(f"  up   b={reduced_field:.5g}")
-                solution, solver, applied_field = solve_point(
-                    device,
-                    seed_solution,
-                    reduced_field=reduced_field,
+                print(
+                    f"  up   b={reduced_field:.5g}, n={cell.flux_quanta}, "
+                    f"L=({cell.dimensionless_lengths[0]:.5g}, "
+                    f"{cell.dimensionless_lengths[1]:.5g})"
+                )
+                solution = solve_point(
+                    cell,
                     output_file=output_file,
-                    field_units=args.field_units,
-                    solve_time=args.solve_time,
-                    dt_init=args.dt_init,
-                    dt_max=args.dt_max,
-                    save_every=args.save_every,
-                    progress_interval=args.progress_interval,
-                    equilibrium_tolerance=args.equilibrium_tolerance,
-                    equilibrium_window=args.equilibrium_window,
-                    equilibrium_min_time=args.equilibrium_min_time,
+                    args=args,
                 )
                 row = measure_solution(
                     solution,
-                    solver,
                     alpha=alpha,
                     direction="up",
                     sequence_index=sequence_index,
                     reduced_field=reduced_field,
-                    applied_field=applied_field,
-                    field_units=args.field_units,
-                    width=args.width,
-                    max_edge_length=args.max_edge_length,
-                    boundary_strip=args.boundary_strip,
                     solve_time=args.solve_time,
                     phase_amplitude_floor=args.phase_amplitude_floor,
                     state_amplitude_threshold=strictest_threshold,
@@ -1288,8 +1471,6 @@ def run_scan(args) -> tuple[list[dict], list[dict]]:
                 measurements.append(row)
                 write_csv(measurements_path, measurements, MEASUREMENT_FIELDS)
             alpha_up_measurements.append(row)
-            last_up_measurement = row
-            seed_solution = solution
 
             if not args.down_sweep and transition_confirmed(
                 alpha_up_measurements,
@@ -1305,31 +1486,14 @@ def run_scan(args) -> tuple[list[dict], list[dict]]:
                 break
 
         if args.down_sweep:
-            # The maximum-field state is already converged and is the initial
-            # point of the return branch, so record it without solving twice.
-            down_key = (alpha, "down", 0)
-            if down_key in existing:
-                down_start = existing[down_key]
-                expected_file = output_directory / str(
-                    last_up_measurement["output_file"]
-                )
-                load_resume_checkpoint(
-                    down_start,
-                    output_directory=output_directory,
-                    expected_file=expected_file,
-                    device=device,
-                    args=args,
-                    alpha=alpha,
-                )
-                consumed.add(down_key)
-            else:
-                down_start = dict(last_up_measurement)
-                down_start["direction"] = "down"
-                down_start["sequence_index"] = 0
-                measurements.append(down_start)
-                write_csv(measurements_path, measurements, MEASUREMENT_FIELDS)
-            for sequence_index, reduced_field in enumerate(fields[-2::-1], start=1):
+            # Direction records scan order only. Each point still receives a
+            # fresh same-cell mixed seed, so no differently sized torus is ever
+            # used as an implicit continuation state.
+            for sequence_index, reduced_field in enumerate(fields[::-1]):
                 reduced_field = float(reduced_field)
+                cell = build_cell(
+                    alpha, reduced_field, args.grid_points, args.aspect_ratio
+                )
                 stem = (
                     f"alpha_{alpha:.6f}_down_{sequence_index:03d}_"
                     f"b_{reduced_field:.6f}.h5"
@@ -1343,40 +1507,27 @@ def run_scan(args) -> tuple[list[dict], list[dict]]:
                         row,
                         output_directory=output_directory,
                         expected_file=output_file,
-                        device=device,
+                        cell=cell,
                         args=args,
-                        alpha=alpha,
                     )
                     consumed.add(key)
                 else:
-                    print(f"  down b={reduced_field:.5g}")
-                    solution, solver, applied_field = solve_point(
-                        device,
-                        seed_solution,
-                        reduced_field=reduced_field,
+                    print(
+                        f"  down b={reduced_field:.5g}, n={cell.flux_quanta}, "
+                        f"L=({cell.dimensionless_lengths[0]:.5g}, "
+                        f"{cell.dimensionless_lengths[1]:.5g})"
+                    )
+                    solution = solve_point(
+                        cell,
                         output_file=output_file,
-                        field_units=args.field_units,
-                        solve_time=args.solve_time,
-                        dt_init=args.dt_init,
-                        dt_max=args.dt_max,
-                        save_every=args.save_every,
-                        progress_interval=args.progress_interval,
-                        equilibrium_tolerance=args.equilibrium_tolerance,
-                        equilibrium_window=args.equilibrium_window,
-                        equilibrium_min_time=args.equilibrium_min_time,
+                        args=args,
                     )
                     row = measure_solution(
                         solution,
-                        solver,
                         alpha=alpha,
                         direction="down",
                         sequence_index=sequence_index,
                         reduced_field=reduced_field,
-                        applied_field=applied_field,
-                        field_units=args.field_units,
-                        width=args.width,
-                        max_edge_length=args.max_edge_length,
-                        boundary_strip=args.boundary_strip,
                         solve_time=args.solve_time,
                         phase_amplitude_floor=args.phase_amplitude_floor,
                         state_amplitude_threshold=strictest_threshold,
@@ -1384,7 +1535,6 @@ def run_scan(args) -> tuple[list[dict], list[dict]]:
                     )
                     measurements.append(row)
                     write_csv(measurements_path, measurements, MEASUREMENT_FIELDS)
-                seed_solution = solution
 
         transitions = build_transition_rows(
             measurements, thresholds, args.normal_state_threshold
@@ -1418,22 +1568,33 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--thresholds",
         default="0.001,0.003,0.01",
-        help="Bulk max-|d'| thresholds; the first is used in plots.",
-    )
-    parser.add_argument("--width", type=float, default=12.0, help="Square width in xi.")
-    parser.add_argument(
-        "--max-edge-length", type=float, default=0.25, help="Mesh scale in xi."
+        help="Whole-torus max-|d'| thresholds; the first is used in plots.",
     )
     parser.add_argument(
-        "--boundary-strip",
+        "--grid-points",
+        type=int,
+        default=24,
+        metavar="N",
+        help="Fixed endpoint-excluded N x N grid used at every field.",
+    )
+    parser.add_argument(
+        "--aspect-ratio",
         type=float,
-        default=2.0,
-        help="Excluded edge strip in xi.",
+        default=1.0,
+        metavar="LX/LY",
+        help="Physical magnetic-periodic cell aspect ratio Lx/Ly.",
     )
-    parser.add_argument("--smooth", type=int, default=20)
     parser.add_argument("--solve-time", type=float, default=1500.0)
-    parser.add_argument("--dt-init", type=float, default=1e-4)
-    parser.add_argument("--dt-max", type=float, default=0.02)
+    parser.add_argument("--dt-init", type=float, default=0.002)
+    parser.add_argument("--dt-max", type=float, default=0.002)
+    parser.add_argument(
+        "--adaptive",
+        action="store_true",
+        help=(
+            "Opt into adaptive timestepping up to --dt-max. Fixed-step mode "
+            "is the default and requires dt-init == dt-max."
+        ),
+    )
     parser.add_argument(
         "--save-every",
         type=int,
@@ -1462,14 +1623,13 @@ def make_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--equilibrium-window", type=int, default=1000)
     parser.add_argument("--equilibrium-min-time", type=float, default=20.0)
-    parser.add_argument("--field-units", default="mT")
     parser.add_argument("--phase-amplitude-floor", type=float, default=1e-3)
     parser.add_argument(
         "--normal-state-threshold",
         type=float,
         default=1e-3,
         help=(
-            "Bulk amplitude below which the dominant d component is absent; "
+            "Whole-torus amplitude below which the dominant d component is absent; "
             "prevents the normal state from being classified as pure d."
         ),
     )
@@ -1499,9 +1659,9 @@ def make_parser() -> argparse.ArgumentParser:
         "--down-sweep",
         action="store_true",
         help=(
-            "Also run the return branch. This doubles the work and a pure-d "
-            "seed cannot regrow d' without a perturbation, so it is not used "
-            "for the primary reproduction."
+            "Also visit the field grid in descending order. Every point still "
+            "uses an independent mixed seed, so this is an ordering diagnostic "
+            "rather than cross-cell continuation."
         ),
     )
     sweep_group.add_argument(

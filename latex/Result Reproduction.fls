@@ -352,6 +352,11 @@ INPUT /usr/local/texlive/2024/texmf-dist/fonts/tfm/public/amsfonts/symbols/msam7
 INPUT /usr/local/texlive/2024/texmf-dist/fonts/tfm/public/amsfonts/symbols/msbm10.tfm
 INPUT /usr/local/texlive/2024/texmf-dist/fonts/tfm/public/amsfonts/symbols/msbm10.tfm
 INPUT /usr/local/texlive/2024/texmf-dist/fonts/tfm/public/amsfonts/symbols/msbm7.tfm
+INPUT ./images/lei_d_plus_d_prime_phase_scan.png
+INPUT ./images/lei_d_plus_d_prime_phase_scan.png
+INPUT ./images/lei_d_plus_d_prime_phase_scan.png
+INPUT ./images/lei_d_plus_d_prime_phase_scan.png
+INPUT ./images/lei_d_plus_d_prime_phase_scan.png
 INPUT ./images/Babaev_fig1.png
 INPUT ./images/Babaev_fig1.png
 INPUT ./images/Babaev_fig1.png
@@ -412,8 +417,6 @@ INPUT ./images/li_fig4_reproduction.png
 INPUT ./images/li_fig4_reproduction.png
 INPUT ./images/li_fig4_reproduction.png
 INPUT ./images/li_fig4_reproduction.png
-INPUT /usr/local/texlive/2024/texmf-dist/fonts/tfm/public/cm/cmss10.tfm
-INPUT /usr/local/texlive/2024/texmf-dist/fonts/tfm/public/cm/cmssbx10.tfm
 INPUT Result Reproduction.aux
 INPUT ./Result Reproduction.out
 INPUT ./Result Reproduction.out

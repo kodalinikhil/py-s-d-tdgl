@@ -104,6 +104,7 @@ The ``pyTDGL`` Python API is adapted from `SuperScreen <https://superscreen.read
    installation.rst
    notebooks/quickstart.ipynb
    background.rst
+   magnetic_periodic.rst
 
 .. toctree::
    :maxdepth: 2

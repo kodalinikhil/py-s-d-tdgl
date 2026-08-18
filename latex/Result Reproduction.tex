@@ -40,6 +40,8 @@
 \section{Goncalves et al., ``Numerical solution of the time dependent Ginzburg-Landau equations for mixed (d + s)-
 wave superconductors"}
 
+\textbf{Note: I believe the behavioral differences below are primarily due to the mesh not being fine enough. The subsection on reproducing Fig. 6 is flawed because of that.}
+
 We reproduce the results in Sec.~VIII using
 $\kappa_D=2$, $\tau_1=8/3$, $\tau_3=16/3$, $\tau_4=2$, $\nu=-2$,
 $\eta_s=2$, and $\eta_v=1$.  The $8\xi_D\times8\xi_D$ film starts from
@@ -60,17 +62,6 @@ different fields.
     \caption{Our transition-refined field continuation.  Blue circles show the
     increasing-field branch and red squares show the decreasing-field branch.}
     \label{fig:goncalves-field-dependence}
-\end{figure}
-
-The density trends and overall increase in vortex count are reproduced, with
-the largest branch differences near vortex transitions.  Unlike the paper, our
-return state contains no vortex at $H=0$.
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.9\textwidth]{images/goncalves_trapped_flux.png}
-    \caption{Final return-leg state at $H=0$, with no trapped vortex.}
-    \label{fig:goncalves-return-state}
 \end{figure}
 
 \subsection{Attempts to reproduce Fig.~6}
@@ -130,12 +121,6 @@ The straight jump suppresses the boundary condensate, admitting vortices
 before the edge barrier reforms.  It thus reaches the high-vorticity
 metastable basin retained on the down sweep, while small up-sweep steps remain
 in a lower-vorticity basin.  This match does not establish a unique equilibrium.
-
-Remaining differences likely arise from three sources: the triangular
-Delaunay/Voronoi mesh changes numerical symmetry, edge barriers, and pinning;
-the unspecified $\beta_{\mathrm{em}}$ (set to $1$ here) changes the finite-time
-path, though not the stationary equations; and our coarser field steps can
-cross several vortex thresholds near $H/H_{c2}=1.040$ and $1.125$.
 
 \clearpage
 \section{Xu, Ren, Ting, ``Structures of single vortex and vortex lattice in a d-wave superconductor"}
@@ -247,7 +232,16 @@ finite domain, mesh, boundary conditions, or relaxation parameters.
 \section{Lei et al., ``Field Driven Pairing State Phase Transition
 in $d_{x^2-y^2} + id_{xy}$-Wave Superconductors"}
 
-\textbf{We run into major issues in this section because we do not use the magnetic periodic boundary conditions of the paper.}
+Using magnetic-periodic boundary conditions, we see the $d+d'$ to pure-$d$
+phase transition at approximately $b=B/B_{c2}=0.7$, at which it is expected.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.72\linewidth]{images/lei_d_plus_d_prime_phase_scan.png}
+    \caption{Magnetic-periodic $d+d'$ field scan showing the transition near
+    $b=0.7$.}
+    \label{fig:lei-ddp-transition}
+\end{figure}
 
 \section{Babaev et al., ``Type-1.5 Superconducting State from an Intrinsic Proximity Effect
 in Two-Band Superconductors''}
@@ -312,17 +306,14 @@ domain, grid resolution, and values digitized from the paper.
 \section{Li et al., ``Vortex dynamics of a d + is-wave superconductor''}
 
 We mapped Li \textit{et al.}'s parameters and relaxation factors onto the
-$s+d$ TDGL model.  The \texttt{quick} runs use a $13\times13$ mesh,
-$\Delta t=2\times10^{-3}$, and the paper's one-flux-quantum cell area.
-Figure~3 includes $q=1$ and $q=10$ only.  Because our boundaries differ from
-the paper's, these are open-cell surrogates rather than exact reproductions.
+$s+d$ TDGL model.  The \texttt{quick} runs use a $13\times13$ structured grid,
+$\Delta t\leq2\times10^{-3}$, and one flux quantum per magnetic-periodic cell.
+Figure~3 includes $q=1$ and $q=10$ only.  Opposite sides now obey the paper's
+magnetic translations, so there is no physical perimeter or $B=H$ boundary.
+Remaining differences reflect short relaxations, coarse resolution, and
+parameters omitted by the paper; many of our states are not converged well, but we still reproduce the results roughly.
 
 \subsection{Gibbs-energy branches}
-
-Although the paper repeats a flux-flow caption for Fig.~2, its axes and text
-identify a Gibbs-energy construction.  Our mixed branch rises similarly
-toward the normal state.  All 16 samples have the expected winding, but only
-one reaches the strict \texttt{quick} equilibrium tolerance.
 
 \begin{figure}[H]
     \centering
@@ -334,9 +325,9 @@ one reaches the strict \texttt{quick} equilibrium tolerance.
         \centering
         \includegraphics[width=\linewidth]{images/li_fig2_reproduction.png}
     \end{minipage}
-    \caption{Li \textit{et al.} Fig.~2 (left) and our open-boundary Gibbs
-    surrogate (right); $H$ is the boundary field and $B$ the measured mean
-    induction.}
+    \caption{Li \textit{et al.} Fig.~2 (left) and our magnetic-periodic Gibbs
+    diagnostic (right).  Filled and open circles denote converged and
+    unconverged fixed-flux states, respectively.}
     \label{fig:li-fig2-comparison}
 \end{figure}
 
@@ -345,29 +336,17 @@ Note that the caption for figure 2 in the paper is not correct; they seem to hav
 \clearpage
 \subsection{Free flux-flow resistivity}
 
-\textbf{We run into major issues in this section because we do not use the magnetic periodic boundary conditions of the paper.}
-
-The $q=1$ response rises faster than $q=10$, matching the paper's ordering.
-However, only 7 of 32 equilibria converge strictly and 16 of 64 driven runs
-retain the $+1$ winding sector, so this is not quantitative fixed-vortex flux
-flow.
-
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.66\linewidth]{images/li_fig3.png}\\[0.3em]
     \includegraphics[width=0.66\linewidth]{images/li_fig3_reproduction.png}
     \caption{Li \textit{et al.} Fig.~3 (top) and our $q=1,10$
-    open-boundary vortex-flow surrogate (bottom).}
+    magnetic-periodic fixed-flux dynamics (bottom).}
     \label{fig:li-fig3-comparison}
 \end{figure}
 
 \clearpage
 \subsection{Twin-boundary depinning}
-
-The sweep does not recover the sharply pinned low-current regime.  Only one
-of four initial equilibria converges strictly and 6 of 40 driven runs retain
-the $+1$ winding sector; after a sector change, $E/J$ no longer measures
-single-vortex depinning.
 
 \begin{figure}[H]
     \centering
@@ -379,8 +358,8 @@ single-vortex depinning.
         \centering
         \includegraphics[width=\linewidth]{images/li_fig4_reproduction.png}
     \end{minipage}
-    \caption{Li \textit{et al.} Fig.~4 (left) and our open-boundary
-    twin-depinning surrogate (right).}
+    \caption{Li \textit{et al.} Fig.~4 (left) and our magnetic-periodic
+    twin-depinning calculation (right).}
     \label{fig:li-fig4-comparison}
 \end{figure}
 

@@ -1,11 +1,19 @@
 from .about import version_dict, version_table
 from .device.device import Device
 from .device.layer import Layer
-from .device.models import DPlusDPrimeModel, SingleBandModel, SPlusDModel, SPlusSModel
 from .device.meshing import generate_mesh
+from .device.models import DPlusDPrimeModel, SingleBandModel, SPlusDModel, SPlusSModel
 from .device.polygon import Polygon
 from .em import ureg
 from .fluxoid import Fluxoid, make_fluxoid_polygons
+from .magnetic_periodic import (
+    MagneticPeriodicCell,
+    MagneticPeriodicFrame,
+    MagneticPeriodicOperators,
+    MagneticPeriodicSolution,
+    MagneticPeriodicSolver,
+    solve_magnetic_periodic,
+)
 from .parameter import Constant, Parameter
 from .solution.data import get_current_through_paths
 from .solution.plot_solution import (

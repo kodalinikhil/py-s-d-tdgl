@@ -3,18 +3,19 @@
 The paper is "Vortex dynamics of a d+is-wave superconductor" (1999).  This
 script implements the three requested dynamical protocols:
 
-2. Gibbs free-energy branches from stationary dynamical relaxations.
+2. Gibbs free-energy branches from stationary fixed-B relaxations, with applied
+   ``H`` reconstructed using the paper's virial relation only after convergence.
 3. Free-flux-flow resistivity versus field and order-parameter relaxation rate.
 4. Twin-boundary depinning curves and the paper's square-root fits.
 
-The original calculation used magnetic-periodic one/two-vortex cells.  The
-current framework has open variational boundaries, so Figures 2--4 are
-finite-domain analogues rather than bit-for-bit reproductions.  The script
-retains the paper's one-flux cell area, coefficient normalization, dissipative
-dynamics, bulk drive, and time-averaged electric-field observables.  Every run
-records requested H and measured mean B separately.  Figure 3 retains the
+The calculation uses the dedicated rectangular magnetic-periodic backend.  A
+cell with ``N`` flux quanta has exactly ``B Lx Ly = 2 pi N``; the grid contains
+``grid_points`` unique sites in each direction, with no duplicated endpoint.
+The paper's coefficient normalization, dissipative dynamics, bulk drive, and
+time-averaged electric-field observables are retained.  Figure 3 includes the
 ``q=1`` and ``q=10`` curves; the prohibitively expensive ``q=0.01`` branch is
-intentionally omitted.
+intentionally omitted.  Figure 2 records fixed ``B`` and virial-derived ``H``
+separately.
 
 Examples
 --------
@@ -40,7 +41,6 @@ figures without launching simulations.
 from __future__ import annotations
 
 import argparse
-import copy
 import csv
 import hashlib
 import json
@@ -55,21 +55,20 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-import h5py
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.spatial import Delaunay
 
 import tdgl
-from tdgl.finite_volume.operators import build_triangle_magnetic_field_curl
-
+from tdgl.magnetic_periodic.cell import MagneticPeriodicCell
+from tdgl.magnetic_periodic.solution import MagneticPeriodicSolution
+from tdgl.magnetic_periodic.solver import solve_magnetic_periodic
 
 PAPER_ID = "cond-mat/9906211"
 PAPER_TITLE = "Vortex dynamics of a d+is-wave superconductor"
-RUN_SCHEMA_VERSION = 5
+RUN_SCHEMA_VERSION = 7
 DEFAULT_OUTPUT_DIR = REPOSITORY_ROOT / "results/reproductions/li_wang_wang_1999"
 DEFAULT_FIG3_CURRENT = 0.1  # Inferred from the numerical-method Ref. 17.
 DEFAULT_TWIN_SPACING = 10.8
@@ -87,7 +86,7 @@ class ReproductionPreset:
     drive_skip_time: float
     drive_measure_time: float
     save_every: int
-    fig2_fields: tuple[float, ...]
+    fig2_inductions: tuple[float, ...]
     fig3_alphas: tuple[float, ...]
     fig3_relaxations: tuple[float, ...]
     fig3_fields: tuple[float, ...]
@@ -104,7 +103,7 @@ PRESETS = {
         drive_skip_time=4e-3,
         drive_measure_time=1.2e-2,
         save_every=2,
-        fig2_fields=(0.0, 0.2, 1.0, 1.4),
+        fig2_inductions=(0.0, 0.2, 1.0, 1.4),
         fig3_alphas=(0.85,),
         fig3_relaxations=(1.0,),
         fig3_fields=(0.2, 0.8, 1.2),
@@ -119,15 +118,15 @@ PRESETS = {
         drive_skip_time=5.0,
         drive_measure_time=10.0,
         save_every=100,
-        fig2_fields=tuple(np.linspace(0.0, 1.45, 16)),
+        fig2_inductions=tuple(np.linspace(0.0, 1.45, 16)),
         fig3_alphas=(0.97, 0.85, 0.67, -1.0),
         fig3_relaxations=(1.0, 10.0),
         fig3_fields=(0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2),
         fig4_currents=tuple(np.linspace(0.10, 0.28, 10)),
     ),
     "paper": ReproductionPreset(
-        # Ref. 17 used a 19-by-19 square grid.  The open-boundary analogue
-        # keeps that count while jittering interior vertices for a valid dual mesh.
+        # Ref. 17 used a 19-by-19 periodic grid: dx=L/19 because the endpoint
+        # is not duplicated.
         grid_points=19,
         dt=1e-3,
         equilibrium_time=100.0,
@@ -136,7 +135,7 @@ PRESETS = {
         drive_skip_time=50.0,
         drive_measure_time=100.0,
         save_every=500,
-        fig2_fields=tuple(np.linspace(0.0, 1.45, 30)),
+        fig2_inductions=tuple(np.linspace(0.0, 1.45, 30)),
         fig3_alphas=(0.97, 0.85, 0.67, -1.0),
         fig3_relaxations=(1.0, 10.0),
         fig3_fields=tuple(np.linspace(0.02, 1.20, 25)),
@@ -229,63 +228,34 @@ def one_flux_cell_side(reduced_induction: float, num_flux: int = 1) -> float:
     return math.sqrt(2 * math.pi * num_flux / reduced_induction)
 
 
-def make_square_device(
+def make_square_cell(
     model: tdgl.SPlusDModel,
     *,
     side_length: float,
     grid_points: int,
     kappa: float,
-    mesh_seed: int,
-) -> tdgl.Device:
-    """Build a deterministic, D4-symmetric, nearly Cartesian open mesh."""
+    flux_quanta: int,
+) -> MagneticPeriodicCell:
+    """Build a square fixed-flux cell with unique endpoint-excluded sites."""
     if grid_points < 3:
         raise ValueError("grid_points must be at least 3")
     if kappa <= 0:
         raise ValueError("kappa must be positive")
+    if flux_quanta < 0:
+        raise ValueError("flux_quanta must be nonnegative")
     layer = tdgl.Layer(
         coherence_length=1.0,
         london_lambda=kappa,
         thickness=0.1,
         model=model,
     )
-    film = tdgl.Polygon(
-        "film", points=tdgl.geometry.box(side_length, side_length)
-    ).resample(max(4 * grid_points, 40))
-    device = tdgl.Device("li_wang_wang_square", layer=layer, film=film)
-
-    coordinates = np.linspace(-side_length / 2, side_length / 2, grid_points)
-    x, y = np.meshgrid(coordinates, coordinates)
-    points = np.column_stack((x.ravel(), y.ravel()))
-    interior = (np.abs(points[:, 0]) < side_length / 2) & (
-        np.abs(points[:, 1]) < side_length / 2
+    return MagneticPeriodicCell(
+        layer=layer,
+        lengths=(side_length, side_length),
+        shape=(grid_points, grid_points),
+        flux_quanta=flux_quanta,
+        origin=(-side_length / 2, -side_length / 2),
     )
-    spacing = side_length / (grid_points - 1)
-    # A generic D4-equivariant warp removes Cartesian cocircularities without
-    # introducing a randomly asymmetric mesh bias.
-    rng = np.random.default_rng(mesh_seed)
-    a, b, c, d = rng.uniform(-1.0, 1.0, size=4)
-    x_normalized = 2 * points[:, 0] / side_length
-    y_normalized = 2 * points[:, 1] / side_length
-    displacement_x = np.sin(np.pi * x_normalized) * (
-        a
-        + b * np.cos(np.pi * y_normalized)
-        + c * np.cos(2 * np.pi * x_normalized)
-        + d * np.cos(2 * np.pi * y_normalized)
-    )
-    displacement_y = np.sin(np.pi * y_normalized) * (
-        a
-        + b * np.cos(np.pi * x_normalized)
-        + c * np.cos(2 * np.pi * y_normalized)
-        + d * np.cos(2 * np.pi * x_normalized)
-    )
-    displacement = np.column_stack((displacement_x, displacement_y))
-    max_displacement = np.max(np.linalg.norm(displacement[interior], axis=1))
-    if max_displacement:
-        displacement *= 0.03 * spacing / max_displacement
-    points[interior] += displacement[interior]
-    triangles = Delaunay(points).simplices
-    device._create_dimensionless_mesh(points, triangles)
-    return device
 
 
 def li_vortex_seed(
@@ -318,55 +288,53 @@ def li_vortex_seed(
     return d_bulk * core * phase, s_bulk * core * phase
 
 
-def net_vortex_count(mesh, order_parameter: np.ndarray) -> int:
-    """Count signed phase singularities from wrapped triangle windings."""
-    psi = np.asarray(order_parameter)
-    phases = np.angle(psi[mesh.elements])
-    wrapped = np.angle(np.exp(1j * (np.roll(phases, -1, axis=1) - phases)))
-    winding = np.rint(np.sum(wrapped, axis=1) / (2 * np.pi)).astype(int)
-    coordinates = mesh.sites[mesh.elements]
-    edge_1 = coordinates[:, 1] - coordinates[:, 0]
-    edge_2 = coordinates[:, 2] - coordinates[:, 0]
-    orientation = np.sign(
-        edge_1[:, 0] * edge_2[:, 1] - edge_1[:, 1] * edge_2[:, 0]
-    ).astype(int)
-    return int(np.sum(orientation * winding))
+def li_periodic_vortex_seed(
+    cell: MagneticPeriodicCell,
+    alpha_s: float,
+    *,
+    chirality: int,
+    num_vortices: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Seed vortices away from cell-centered grid sites on the torus."""
+    offset = np.array([0.25 * cell.hx, 0.25 * cell.hy])
+    return li_vortex_seed(
+        cell.sites - offset,
+        alpha_s,
+        chirality=chirality,
+        num_vortices=num_vortices,
+    )
 
 
-def solution_vortex_count(solution: tdgl.Solution) -> int:
-    """Return the net d-component vortex count in the final saved state."""
-    return net_vortex_count(solution.device.mesh, solution.tdgl_data.psi2)
+def solution_vortex_count(solution: MagneticPeriodicSolution) -> int:
+    """Return the gauge-invariant d-component vortex sector."""
+    return solution.vortex_count
 
 
 def check_vortex_retention(
-    solution: tdgl.Solution,
+    solution: MagneticPeriodicSolution,
     *,
     expected: int,
-    strict: bool,
+    strict: bool = True,
     label: str,
 ) -> int:
-    """Warn, or fail in strict mode, when an open cell loses its vortex."""
+    """Verify the exact fixed-flux topological invariant.
+
+    ``strict`` is retained for command-line compatibility but the periodic
+    backend always treats a sector mismatch as an implementation error.
+    """
+    del strict
+    if solution.cell.flux_quanta != expected:
+        raise RuntimeError(
+            f"{label}: checkpoint flux sector {solution.cell.flux_quanta} does "
+            f"not match requested sector {expected}."
+        )
     count = solution_vortex_count(solution)
     if count != expected:
-        message = (
+        raise RuntimeError(
             f"{label}: expected {expected} vortex/vortices but found {count}. "
-            "The open-boundary cell is not a fixed-flux replacement for the "
-            "paper's magnetic-periodic cell."
+            "A magnetic-periodic trajectory must preserve its flux sector."
         )
-        if strict:
-            raise RuntimeError(message)
-        warnings.warn(message, RuntimeWarning, stacklevel=2)
     return count
-
-
-def rebind_seed_to_device(
-    solution: tdgl.Solution,
-    device: tdgl.Device,
-) -> tdgl.Solution:
-    """Reuse identical equilibrium arrays with a dynamics-only model clock."""
-    rebound = copy.copy(solution)
-    rebound.device = device
-    return rebound
 
 
 def twin_disorder_profile(
@@ -390,15 +358,11 @@ def twin_disorder_profile(
     return disorder
 
 
-def reduced_field_source(device: tdgl.Device, reduced_field: float):
-    """Return a ConstantField for H/B0, where B0 is the pure-d Bc2 scale."""
-    field_units = "mT"
-    dimensional = reduced_field * device.Bc2.to(field_units).magnitude
-    return tdgl.sources.ConstantField(
-        dimensional,
-        field_units=field_units,
-        length_units=device.length_units,
-    )
+def default_twin_width(side_length: float, grid_points: int) -> float:
+    """One endpoint-excluded periodic grid spacing, ``L/N``."""
+    if side_length <= 0 or grid_points < 2:
+        raise ValueError("side_length must be positive and grid_points at least 2")
+    return side_length / grid_points
 
 
 def _slug(value: float | str) -> str:
@@ -415,22 +379,14 @@ def checkpoint_path(root: Path, figure: str, *parts: float | str) -> Path:
 
 
 def validate_checkpoint(
-    solution: tdgl.Solution,
-    device: tdgl.Device,
+    solution: MagneticPeriodicSolution,
+    cell: MagneticPeriodicCell,
     options: tdgl.SolverOptions,
 ) -> None:
     """Reject a stale, mismatched, or incomplete checkpoint."""
-    saved_mesh = solution.device.mesh
-    expected_mesh = device.mesh
-    same_mesh = (
-        saved_mesh.sites.shape == expected_mesh.sites.shape
-        and saved_mesh.elements.shape == expected_mesh.elements.shape
-        and np.allclose(saved_mesh.sites, expected_mesh.sites, rtol=0, atol=1e-13)
-        and np.array_equal(saved_mesh.elements, expected_mesh.elements)
-    )
-    if not same_mesh or solution.device.layer.model != device.layer.model:
+    if solution.cell != cell:
         raise RuntimeError(
-            f"Checkpoint {solution.path} does not match the requested mesh/model."
+            f"Checkpoint {solution.path} does not match the requested cell/model."
         )
     for name in ("solve_time", "skip_time", "dt_init", "dt_max"):
         if not math.isclose(
@@ -442,10 +398,10 @@ def validate_checkpoint(
             raise RuntimeError(
                 f"Checkpoint {solution.path} has incompatible option {name}."
             )
-    state = solution.tdgl_data.state
-    final_time = float(state.get("time", 0.0))
+    state = solution.state
+    final_time = solution.final_time
     reached = bool(state.get("equilibrium_reached", False))
-    tolerance = max(1e-12, 2 * float(state.get("dt", options.dt_init)))
+    tolerance = max(1e-12, 2 * float(solution.final_frame.dt or options.dt_init))
     if not reached and final_time + tolerance < options.solve_time:
         raise RuntimeError(
             f"Checkpoint {solution.path} is incomplete: t={final_time:g}, "
@@ -453,14 +409,14 @@ def validate_checkpoint(
         )
 
 
-def state_diagnostics(solution: tdgl.Solution, prefix: str) -> dict:
+def state_diagnostics(solution: MagneticPeriodicSolution, prefix: str) -> dict:
     """Return compact completion/equilibrium metadata for a CSV row."""
-    state = solution.tdgl_data.state
+    state = solution.state
     result = {
-        f"{prefix}_final_time": float(state.get("time", float("nan"))),
-        f"{prefix}_final_step": int(state.get("step", -1)),
+        f"{prefix}_final_time": solution.final_time,
+        f"{prefix}_final_step": solution.final_step,
     }
-    if "equilibrium_reached" in state:
+    if solution.options.equilibrium_tolerance is not None:
         result[f"{prefix}_equilibrium_reached"] = bool(state["equilibrium_reached"])
         result[f"{prefix}_equilibrium_error"] = float(
             state.get("equilibrium_error", float("nan"))
@@ -475,10 +431,10 @@ def state_diagnostics(solution: tdgl.Solution, prefix: str) -> dict:
 
 
 def warn_if_unconverged(
-    solution: tdgl.Solution,
+    solution: MagneticPeriodicSolution,
     options: tdgl.SolverOptions,
 ) -> None:
-    state = solution.tdgl_data.state
+    state = solution.state
     if options.equilibrium_tolerance is not None and not bool(
         state.get("equilibrium_reached", False)
     ):
@@ -502,7 +458,7 @@ def equilibrium_options(
         solve_time=solve_time,
         dt_init=preset.dt,
         dt_max=preset.dt,
-        adaptive=False,
+        adaptive=True,
         include_screening=True,
         equilibrium_tolerance=preset.equilibrium_tolerance,
         equilibrium_window=max(1, math.ceil(clock_scale * preset.equilibrium_window)),
@@ -531,7 +487,7 @@ def drive_options(
         skip_time=clock_scale * preset.drive_skip_time,
         dt_init=preset.dt,
         dt_max=preset.dt,
-        adaptive=False,
+        adaptive=True,
         include_screening=True,
         equilibrium_tolerance=None,
         terminal_psi=None,
@@ -544,219 +500,122 @@ def drive_options(
     )
 
 
+def _same_cell_geometry(
+    first: MagneticPeriodicCell,
+    second: MagneticPeriodicCell,
+) -> bool:
+    """Return whether explicit fields can be transferred between two cells."""
+    return (
+        first.shape == second.shape
+        and first.flux_quanta == second.flux_quanta
+        and first.length_units == second.length_units
+        and math.isclose(first.length_x, second.length_x, rel_tol=0, abs_tol=1e-13)
+        and math.isclose(first.length_y, second.length_y, rel_tol=0, abs_tol=1e-13)
+        and np.allclose(first.origin, second.origin, rtol=0, atol=1e-13)
+        and math.isclose(
+            first.layer.coherence_length,
+            second.layer.coherence_length,
+            rel_tol=0,
+            abs_tol=1e-13,
+        )
+    )
+
+
 def solve_or_load(
-    device: tdgl.Device,
+    cell: MagneticPeriodicCell,
     options: tdgl.SolverOptions,
-    applied_vector_potential,
     *,
     alpha_s: float,
     chirality: int,
     disorder_epsilon=1.0,
-    seed_solution: tdgl.Solution | None = None,
+    seed_solution: MagneticPeriodicSolution | None = None,
     num_vortices: int = 0,
     plot_only: bool = False,
-) -> tdgl.Solution:
+) -> MagneticPeriodicSolution:
     """Load an existing checkpoint or run one TDGL stage."""
     path = Path(options.output_file)
     if path.exists():
         print(f"Reusing {path}")
-        solution = tdgl.Solution.from_hdf5(str(path))
-        validate_checkpoint(solution, device, options)
+        solution = MagneticPeriodicSolution.from_hdf5(str(path))
+        validate_checkpoint(solution, cell, options)
         warn_if_unconverged(solution, options)
         return solution
     if plot_only:
         raise FileNotFoundError(f"Missing checkpoint in --plot-only mode: {path}")
 
-    solver = tdgl.TDGLSolver(
-        device=device,
-        options=options,
-        applied_vector_potential=applied_vector_potential,
-        disorder_epsilon=disorder_epsilon,
-        seed_solution=seed_solution,
-    )
+    solve_kwargs = {}
     if seed_solution is None:
-        d_seed, s_seed = li_vortex_seed(
-            solver.device.mesh.sites,
+        d_seed, s_seed = li_periodic_vortex_seed(
+            cell,
             alpha_s,
             chirality=chirality,
             num_vortices=num_vortices,
         )
-        solver.psi2_init[:] = d_seed
-        solver.psi1_init[:] = s_seed
+        solve_kwargs.update(initial_psi_d=d_seed, initial_psi_s=s_seed)
+    elif seed_solution.cell == cell:
+        solve_kwargs["seed_solution"] = seed_solution
+    else:
+        if not _same_cell_geometry(seed_solution.cell, cell):
+            raise ValueError("Cannot transfer a seed between incompatible cells.")
+        frame = seed_solution.final_frame
+        solve_kwargs.update(
+            initial_psi_d=frame.psi_d,
+            initial_psi_s=frame.psi_s,
+            initial_vector_potential=frame.vector_potential,
+        )
     print(f"Running {path}")
-    solution = solver.solve()
-    if solution is None:
-        raise RuntimeError(f"Simulation was cancelled before producing {path}")
+    solution = solve_magnetic_periodic(
+        cell,
+        options,
+        disorder_epsilon=disorder_epsilon,
+        **solve_kwargs,
+    )
     warn_if_unconverged(solution, options)
     return solution
 
 
-def triangle_areas(mesh) -> np.ndarray:
-    coords = mesh.sites[mesh.elements]
-    edge_1 = coords[:, 1] - coords[:, 0]
-    edge_2 = coords[:, 2] - coords[:, 0]
-    return 0.5 * np.abs(edge_1[:, 0] * edge_2[:, 1] - edge_1[:, 1] * edge_2[:, 0])
+def mean_induction(solution: MagneticPeriodicSolution) -> float:
+    """Return the topologically fixed mean B/B0."""
+    return solution.mean_induction
 
 
-def mean_induction(solution: tdgl.Solution) -> float:
-    """Area-average the final total B/B0 over mesh triangles."""
-    mesh = solution.device.mesh
-    curl_x, curl_y = build_triangle_magnetic_field_curl(mesh)
-    data = solution.tdgl_data
-    vector_potential = np.asarray(data.applied_vector_potential) + np.asarray(
-        data.induced_vector_potential
-    )
-    field = curl_x @ vector_potential[:, 0] + curl_y @ vector_potential[:, 1]
-    return float(np.average(np.asarray(field), weights=triangle_areas(mesh)))
-
-
-def induction_statistics(solution: tdgl.Solution) -> tuple[float, float]:
+def induction_statistics(
+    solution: MagneticPeriodicSolution,
+) -> tuple[float, float]:
     """Return the temporal mean/std of spatially averaged B/B0."""
-    mesh = solution.device.mesh
-    curl_x, curl_y = build_triangle_magnetic_field_curl(mesh)
-    applied = np.asarray(solution.tdgl_data.applied_vector_potential)
-    weights = triangle_areas(mesh)
-    values = []
-    with h5py.File(solution.path, "r") as h5file:
-        for key in sorted((int(key) for key in h5file["data"]), key=int):
-            induced = np.asarray(h5file[f"data/{key}/induced_vector_potential"])
-            vector_potential = applied + induced
-            field = curl_x @ vector_potential[:, 0] + curl_y @ vector_potential[:, 1]
-            values.append(float(np.average(field, weights=weights)))
-    return float(np.mean(values)), float(np.std(values))
+    return solution.induction_statistics()
 
 
-def global_vector_from_tangential(mesh, edge_values: np.ndarray) -> np.ndarray:
-    """Reconstruct on each triangle, then return the spatial area average.
-
-    This deliberately avoids ``Mesh.get_quantity_on_site()``, whose vector
-    path contains pyTDGL's legacy factor-of-two current normalization.
-    """
-    values = np.asarray(edge_values, dtype=float)
-    tangents = np.asarray(mesh.edge_mesh.normalized_directions)
-    if values.shape != (len(tangents),):
-        raise ValueError(f"Expected edge values with shape ({len(tangents)},)")
-    edge_lookup = {
-        tuple(sorted((int(start), int(end)))): index
-        for index, (start, end) in enumerate(mesh.edge_mesh.edges)
-    }
-    triangle_vectors = []
-    for triangle in mesh.elements:
-        pairs = (
-            (triangle[0], triangle[1]),
-            (triangle[1], triangle[2]),
-            (triangle[2], triangle[0]),
-        )
-        indices = np.array(
-            [edge_lookup[tuple(sorted((int(i), int(j))))] for i, j in pairs]
-        )
-        local_tangents = tangents[indices]
-        vector, *_ = np.linalg.lstsq(local_tangents, values[indices], rcond=None)
-        triangle_vectors.append(vector)
-    return np.average(
-        np.asarray(triangle_vectors), axis=0, weights=triangle_areas(mesh)
-    )
-
-
-def time_averaged_raw_electric_field(solution: tdgl.Solution) -> np.ndarray:
+def time_averaged_raw_electric_field(
+    solution: MagneticPeriodicSolution,
+) -> np.ndarray:
     """Return solver-clock ``<-dA/dt>`` from the measurement endpoints."""
-    mesh = solution.device.mesh
-    with h5py.File(solution.path, "r") as h5file:
-        keys = sorted((int(key) for key in h5file["data"]), key=int)
-        first = h5file[f"data/{keys[0]}"]
-        last = h5file[f"data/{keys[-1]}"]
-        first_time = float(first.attrs["time"])
-        last_time = float(last.attrs["time"])
-        if last_time > first_time:
-            first_a = np.asarray(first["induced_vector_potential"])
-            last_a = np.asarray(last["induced_vector_potential"])
-            dA_dt = (last_a - first_a) / (last_time - first_time)
-            tangent = mesh.edge_mesh.normalized_directions
-            edge_electric = -np.einsum("ij,ij->i", dA_dt, tangent)
-        else:
-            edge_electric = np.asarray(last["normal_current"])
-    return global_vector_from_tangential(mesh, edge_electric)
+    return solution.electric_field
 
 
-def paper_clock_electric_block_delta(solution: tdgl.Solution) -> np.ndarray:
+def paper_clock_electric_block_delta(
+    solution: MagneticPeriodicSolution,
+) -> np.ndarray:
     """Half the signed first/second-half E difference."""
-    mesh = solution.device.mesh
-    with h5py.File(solution.path, "r") as h5file:
-        keys = sorted((int(key) for key in h5file["data"]), key=int)
-        if len(keys) < 3:
-            return np.full(2, np.nan)
-
-        def interval_electric(first_key: int, last_key: int) -> np.ndarray:
-            first = h5file[f"data/{first_key}"]
-            last = h5file[f"data/{last_key}"]
-            duration = float(last.attrs["time"] - first.attrs["time"])
-            if duration <= 0:
-                return np.full(2, np.nan)
-            first_a = np.asarray(first["induced_vector_potential"])
-            last_a = np.asarray(last["induced_vector_potential"])
-            dA_dt = (last_a - first_a) / duration
-            edge_electric = -np.einsum(
-                "ij,ij->i", dA_dt, mesh.edge_mesh.normalized_directions
-            )
-            return global_vector_from_tangential(mesh, edge_electric)
-
-        midpoint = len(keys) // 2
-        first_half = interval_electric(keys[0], keys[midpoint])
-        second_half = interval_electric(keys[midpoint], keys[-1])
-    beta_em = solution.device.layer.model.beta_em
-    return 0.5 * beta_em * (second_half - first_half)
+    return solution.cell.layer.model.beta_em * solution.electric_block_delta()
 
 
-def paper_clock_electric_field(solution: tdgl.Solution) -> np.ndarray:
+def paper_clock_electric_field(solution: MagneticPeriodicSolution) -> np.ndarray:
     """Convert raw solver-clock E to the paper clock used for rho/rho_n."""
-    model = solution.device.layer.model
+    model = solution.cell.layer.model
     return model.beta_em * time_averaged_raw_electric_field(solution)
 
 
-def bulk_condensate_density(solution: tdgl.Solution, fraction: float = 0.7) -> float:
-    """Area-average |d|^2+|s|^2 in a central square, excluding surface modes."""
-    mesh = solution.device.mesh
-    half_extent = np.max(np.abs(mesh.sites), axis=0) * fraction
-    mask = (np.abs(mesh.sites[:, 0]) <= half_extent[0]) & (
-        np.abs(mesh.sites[:, 1]) <= half_extent[1]
-    )
+def bulk_condensate_density(solution: MagneticPeriodicSolution) -> float:
+    """Cell-average |d|^2+|s|^2; a torus has no surface region to remove."""
     data = solution.tdgl_data
     density = np.abs(data.psi2) ** 2 + np.abs(data.psi1) ** 2
-    return float(np.average(density[mask], weights=mesh.areas[mask]))
+    return float(np.mean(density))
 
 
-def discrete_gibbs_free_energy(solution: tdgl.Solution) -> float:
-    """Evaluate the framework's full s+d Gibbs diagnostic on a saved state."""
-    options = tdgl.SolverOptions(
-        solve_time=1e-6,
-        dt_init=1e-6,
-        dt_max=1e-6,
-        adaptive=False,
-        include_screening=True,
-        terminal_psi=None,
-        field_units=solution.options.field_units,
-    )
-    solver = tdgl.TDGLSolver(
-        device=solution.device,
-        options=options,
-        applied_vector_potential=solution.applied_vector_potential,
-        # The saved sitewise epsilon is installed immediately below. Passing
-        # the deserialized callable here is unsafe for legacy checkpoints,
-        # whose vectorization metadata may not survive round-tripping.
-        disorder_epsilon=1.0,
-    )
-    data = solution.tdgl_data
-    total_a = np.asarray(data.applied_vector_potential) + np.asarray(
-        data.induced_vector_potential
-    )
-    solver.epsilon = np.asarray(data.epsilon)
-    return solver.compute_s_plus_d_free_energy(
-        np.asarray(data.psi2),
-        np.asarray(data.psi1),
-        vector_potential=total_a,
-        include_magnetic=True,
-        average=True,
-    )
+def discrete_helmholtz_free_energy(solution: MagneticPeriodicSolution) -> float:
+    """Evaluate the fixed-B Helmholtz density on the final periodic state."""
+    return solution.free_energy_density(include_magnetic=True, applied_field=None)
 
 
 def uniform_condensation_energy(alpha_s: float) -> float:
@@ -793,46 +652,76 @@ def read_csv(path: Path) -> list[dict]:
 
 
 def run_figure_2(args, preset: ReproductionPreset, root: Path) -> Path:
-    csv_path = root / "figure_2_gibbs.csv"
+    csv_path = root / "figure_2_magnetic_periodic_gibbs.csv"
     alpha_s = args.fig2_alpha
     kappa = figure_kappa(args, "2")
     if args.plot_only:
         rows = read_csv(csv_path)
     else:
         rows = []
-        for field in preset.fig2_fields:
-            side = one_flux_cell_side(field) if field > 0 else DEFAULT_TWIN_SPACING
+        for induction in preset.fig2_inductions:
+            flux_quanta = int(induction > 0)
+            side = (
+                one_flux_cell_side(induction, flux_quanta)
+                if flux_quanta
+                else DEFAULT_TWIN_SPACING
+            )
             model = paper_model(alpha_s, 1.0)
-            device = make_square_device(
+            cell = make_square_cell(
                 model,
                 side_length=side,
                 grid_points=preset.grid_points,
                 kappa=kappa,
-                mesh_seed=args.mesh_seed,
+                flux_quanta=flux_quanta,
             )
-            path = checkpoint_path(root, "2", "equilibrium", alpha_s, field)
+            path = checkpoint_path(root, "2", "equilibrium", alpha_s, induction)
             solution = solve_or_load(
-                device,
+                cell,
                 equilibrium_options(preset, path, model),
-                reduced_field_source(device, field),
                 alpha_s=alpha_s,
                 chirality=args.chirality,
-                num_vortices=int(field > 0),
+                num_vortices=flux_quanta,
                 plot_only=args.plot_only,
             )
             vortex_count = check_vortex_retention(
                 solution,
-                expected=int(field > 0),
+                expected=flux_quanta,
                 strict=args.strict_vortex,
-                label=f"Figure 2 H/B0={field:g}",
+                label=f"Figure 2 fixed B/B0={induction:g}",
             )
+            equilibrium_reached = bool(solution.state.get("equilibrium_reached", False))
+            virial_valid = bool(flux_quanta and equilibrium_reached)
+            diagnostic_virial_h = (
+                solution.virial_applied_field() if flux_quanta else 0.0
+            )
+            diagnostic_gibbs = solution.free_energy_density(
+                include_magnetic=True, applied_field=diagnostic_virial_h
+            )
+            virial_h = (
+                diagnostic_virial_h
+                if virial_valid
+                else (0.0 if flux_quanta == 0 else float("nan"))
+            )
+            gibbs_valid = bool(flux_quanta == 0 or virial_valid)
             rows.append(
                 {
                     "alpha_s": alpha_s,
-                    "requested_H_over_B0": field,
-                    "measured_B_over_B0": mean_induction(solution),
-                    "d_vortices": vortex_count,
-                    "gibbs_over_G0": discrete_gibbs_free_energy(solution),
+                    "target_B_over_B0": induction,
+                    "fixed_B_over_B0": mean_induction(solution),
+                    "virial_H_over_B0": virial_h,
+                    "diagnostic_virial_H_over_B0": diagnostic_virial_h,
+                    "virial_valid": virial_valid,
+                    "gibbs_point_valid": gibbs_valid,
+                    "flux_quanta": flux_quanta,
+                    "d_vortex_sector": vortex_count,
+                    "d_vorticity_defined": bool(
+                        solution.state.get("vorticity_defined", False)
+                    ),
+                    "helmholtz_over_G0": discrete_helmholtz_free_energy(solution),
+                    "gibbs_over_G0": (
+                        diagnostic_gibbs if gibbs_valid else float("nan")
+                    ),
+                    "diagnostic_gibbs_over_G0": diagnostic_gibbs,
                     "bulk_density": bulk_condensate_density(solution),
                     "kappa": kappa,
                     "checkpoint": solution.path,
@@ -841,25 +730,80 @@ def run_figure_2(args, preset: ReproductionPreset, root: Path) -> Path:
             )
         write_csv(csv_path, rows)
 
-    h = np.linspace(0, max(float(row["requested_H_over_B0"]) for row in rows), 400)
+    x = np.array([float(row["diagnostic_virial_H_over_B0"]) for row in rows])
+    y = np.array([float(row["diagnostic_gibbs_over_G0"]) for row in rows])
+    flux_quanta = np.array([int(row["flux_quanta"]) for row in rows])
+    virial_valid = np.array(
+        [str(row["virial_valid"]).lower() == "true" for row in rows]
+    )
+    mixed = (flux_quanta != 0) & np.isfinite(x) & np.isfinite(y)
+    order = np.argsort(x[mixed])
+    target_b = np.array([float(row["target_B_over_B0"]) for row in rows])
+    finite_fields = x[np.isfinite(x)]
+    h_max = max(
+        0.1,
+        float(np.max(target_b)) if target_b.size else 0.0,
+        float(np.max(finite_fields)) if finite_fields.size else 0.0,
+    )
+    h = np.linspace(0, h_max, 400)
     meissner = uniform_condensation_energy(alpha_s) + kappa**2 * h**2
-    x = np.array([float(row["requested_H_over_B0"]) for row in rows])
-    y = np.array([float(row["gibbs_over_G0"]) for row in rows])
-    order = np.argsort(x)
     fig, ax = plt.subplots(figsize=(7.2, 5.0))
     ax.plot(h, meissner, color="black", linewidth=1.0, label="Meissner branch")
     ax.axhline(0, color="0.4", linestyle=":", label="normal branch")
-    ax.plot(x[order], y[order], "o-", color="black", markersize=3, label="TDGL branch")
+    if np.any(mixed):
+        ax.plot(
+            x[mixed][order],
+            y[mixed][order],
+            "--",
+            color="0.55",
+            linewidth=1,
+        )
+    unconverged = mixed & ~virial_valid
+    if np.any(unconverged):
+        ax.scatter(
+            x[unconverged],
+            y[unconverged],
+            marker="o",
+            facecolors="none",
+            edgecolors="0.4",
+            s=24,
+            label="unconverged virial diagnostic",
+        )
+    converged = mixed & virial_valid
+    if np.any(converged):
+        ax.scatter(
+            x[converged],
+            y[converged],
+            marker="o",
+            color="black",
+            s=24,
+            label="converged fixed-flux TDGL + virial $H$",
+        )
+    zero_flux = (flux_quanta == 0) & np.isfinite(x) & np.isfinite(y)
+    if np.any(zero_flux):
+        ax.scatter(
+            x[zero_flux],
+            y[zero_flux],
+            marker="s",
+            color="black",
+            s=20,
+            label="zero-flux state",
+        )
     ax.set(
-        xlabel=r"$H/B_0$",
+        xlabel=r"virial $H/B_0$",
         ylabel=r"$G/G_0$",
-        title=rf"Figure 2 open-boundary Gibbs surrogate ($\alpha_s={alpha_s:g}$)",
+        title=rf"Figure 2 magnetic-periodic Gibbs branch ($\alpha_s={alpha_s:g}$)",
     )
-    ax.set_ylim(bottom=min(-0.65, float(np.nanmin(y)) - 0.05), top=0.5)
+    finite_y = y[np.isfinite(y)]
+    if finite_y.size:
+        ax.set_ylim(
+            bottom=min(-0.65, float(np.min(finite_y)) - 0.05),
+            top=max(0.5, float(np.max(finite_y)) + 0.05),
+        )
     ax.legend()
     ax.grid(alpha=0.2)
     fig.tight_layout()
-    output = root / "figure_2_gibbs.png"
+    output = root / "figure_2_magnetic_periodic_gibbs.png"
     fig.savefig(output, dpi=250)
     plt.close(fig)
     return output
@@ -872,18 +816,16 @@ def run_driven_point(
     *,
     figure: str,
     tag_parts: Sequence[float | str],
-    device: tdgl.Device,
+    cell: MagneticPeriodicCell,
     alpha_s: float,
-    field: float,
     current: np.ndarray,
     disorder_epsilon=1.0,
-    seed_solution: tdgl.Solution | None = None,
-) -> tdgl.Solution:
+    seed_solution: MagneticPeriodicSolution | None = None,
+) -> MagneticPeriodicSolution:
     path = checkpoint_path(root, figure, "drive", *tag_parts)
     return solve_or_load(
-        device,
-        drive_options(preset, path, current, device.layer.model),
-        reduced_field_source(device, field),
+        cell,
+        drive_options(preset, path, current, cell.layer.model),
         alpha_s=alpha_s,
         chirality=args.chirality,
         disorder_epsilon=disorder_epsilon,
@@ -893,7 +835,7 @@ def run_driven_point(
 
 
 def run_figure_3(args, preset: ReproductionPreset, root: Path) -> Path:
-    csv_path = root / "figure_3_flux_flow.csv"
+    csv_path = root / "figure_3_magnetic_periodic_flux_flow.csv"
     kappa = figure_kappa(args, "3")
     if args.plot_only:
         rows = read_csv(csv_path)
@@ -902,14 +844,14 @@ def run_figure_3(args, preset: ReproductionPreset, root: Path) -> Path:
         for alpha_s in preset.fig3_alphas:
             hc2 = hc2_over_b0(alpha_s)
             for target_b_over_bc2 in preset.fig3_fields:
-                open_field = b_over_b0_from_bc2_fraction(alpha_s, target_b_over_bc2)
+                fixed_b = b_over_b0_from_bc2_fraction(alpha_s, target_b_over_bc2)
                 equilibrium_model = paper_model(alpha_s, 2.0)
-                equilibrium_device = make_square_device(
+                equilibrium_cell = make_square_cell(
                     equilibrium_model,
-                    side_length=one_flux_cell_side(open_field),
+                    side_length=one_flux_cell_side(fixed_b),
                     grid_points=preset.grid_points,
                     kappa=kappa,
-                    mesh_seed=args.mesh_seed,
+                    flux_quanta=1,
                 )
                 eq_path = checkpoint_path(
                     root,
@@ -919,9 +861,8 @@ def run_figure_3(args, preset: ReproductionPreset, root: Path) -> Path:
                     target_b_over_bc2,
                 )
                 equilibrium = solve_or_load(
-                    equilibrium_device,
+                    equilibrium_cell,
                     equilibrium_options(preset, eq_path, equilibrium_model),
-                    reduced_field_source(equilibrium_device, open_field),
                     alpha_s=alpha_s,
                     chirality=args.chirality,
                     num_vortices=1,
@@ -938,14 +879,13 @@ def run_figure_3(args, preset: ReproductionPreset, root: Path) -> Path:
                 )
                 for relaxation_q in preset.fig3_relaxations:
                     model = paper_model(alpha_s, relaxation_q)
-                    device = make_square_device(
+                    cell = make_square_cell(
                         model,
-                        side_length=one_flux_cell_side(open_field),
+                        side_length=one_flux_cell_side(fixed_b),
                         grid_points=preset.grid_points,
                         kappa=kappa,
-                        mesh_seed=args.mesh_seed,
+                        flux_quanta=1,
                     )
-                    dynamics_seed = rebind_seed_to_device(equilibrium, device)
                     current = np.array([args.fig3_current, 0.0])
                     driven = run_driven_point(
                         args,
@@ -958,11 +898,10 @@ def run_figure_3(args, preset: ReproductionPreset, root: Path) -> Path:
                             target_b_over_bc2,
                             args.fig3_current,
                         ),
-                        device=device,
+                        cell=cell,
                         alpha_s=alpha_s,
-                        field=open_field,
                         current=current,
-                        seed_solution=dynamics_seed,
+                        seed_solution=equilibrium,
                     )
                     driven_vortices = check_vortex_retention(
                         driven,
@@ -981,18 +920,22 @@ def run_figure_3(args, preset: ReproductionPreset, root: Path) -> Path:
                             "alpha_s": alpha_s,
                             "relaxation_q": relaxation_q,
                             "target_B_over_Bc2": target_b_over_bc2,
-                            "open_boundary_H_over_B0": open_field,
-                            "measured_B_over_B0": measured_b_over_b0,
-                            "measured_B_over_Bc2": measured_b_over_b0 / hc2,
+                            "fixed_B_over_B0": measured_b_over_b0,
+                            "fixed_B_over_Bc2": measured_b_over_b0 / hc2,
                             "B_time_std_over_B0": b_std,
                             "B_time_std_over_Bc2": b_std / hc2,
-                            "equilibrium_d_vortices": equilibrium_vortices,
-                            "driven_d_vortices": driven_vortices,
+                            "flux_quanta": 1,
+                            "equilibrium_d_vortex_sector": equilibrium_vortices,
+                            "driven_d_vortex_sector": driven_vortices,
+                            "equilibrium_d_vorticity_defined": bool(
+                                equilibrium.state.get("vorticity_defined", False)
+                            ),
+                            "driven_d_vorticity_defined": bool(
+                                driven.state.get("vorticity_defined", False)
+                            ),
                             "current": args.fig3_current,
                             "E_parallel": electric[0],
-                            "E_perpendicular": electric[1],
                             "E_parallel_block_error": abs(electric_delta[0]),
-                            "E_perpendicular_block_error": abs(electric_delta[1]),
                             "rho_over_rho_n": electric[0] / args.fig3_current,
                             "bulk_density": bulk_condensate_density(driven),
                             "kappa": kappa,
@@ -1006,7 +949,16 @@ def run_figure_3(args, preset: ReproductionPreset, root: Path) -> Path:
     alphas = list(preset.fig3_alphas)
     if args.plot_only:
         alphas = sorted({float(row["alpha_s"]) for row in rows}, reverse=True)
-    fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.0), sharex=True, sharey=True)
+    num_columns = 1 if len(alphas) == 1 else 2
+    num_rows = max(1, math.ceil(len(alphas) / num_columns))
+    fig, axes = plt.subplots(
+        num_rows,
+        num_columns,
+        figsize=(5.25 * num_columns, 4.0 * num_rows),
+        sharex=True,
+        sharey=True,
+        squeeze=False,
+    )
     axes = axes.ravel()
     markers = {1.0: "o", 10.0: "^"}
     for ax, alpha_s in zip(axes, alphas):
@@ -1024,9 +976,9 @@ def run_figure_3(args, preset: ReproductionPreset, root: Path) -> Path:
                 if np.isclose(float(row["alpha_s"]), alpha_s)
                 and np.isclose(float(row["relaxation_q"]), q)
             ]
-            curve.sort(key=lambda row: float(row["measured_B_over_Bc2"]))
+            curve.sort(key=lambda row: float(row["fixed_B_over_Bc2"]))
             ax.plot(
-                [float(row["measured_B_over_Bc2"]) for row in curve],
+                [float(row["fixed_B_over_Bc2"]) for row in curve],
                 [float(row["rho_over_rho_n"]) for row in curve],
                 marker=markers.get(q, "o"),
                 linewidth=1,
@@ -1039,13 +991,13 @@ def run_figure_3(args, preset: ReproductionPreset, root: Path) -> Path:
         ax.set_visible(False)
     for ax in axes:
         if ax.get_visible():
-            ax.set_xlabel(r"measured $B/B_{c2}$")
+            ax.set_xlabel(r"fixed $B/B_{c2}$")
             ax.set_ylabel(r"$\rho/\rho_n$")
     if alphas:
         axes[0].legend()
-    fig.suptitle("Li-Wang-Wang Figure 3: open-boundary vortex-flow surrogate")
+    fig.suptitle("Li-Wang-Wang Figure 3: magnetic-periodic fixed-flux dynamics")
     fig.tight_layout()
-    output = root / "figure_3_flux_flow.png"
+    output = root / "figure_3_magnetic_periodic_flux_flow.png"
     fig.savefig(output, dpi=250)
     plt.close(fig)
     return output
@@ -1075,13 +1027,10 @@ def fit_depinning_curve(currents: np.ndarray, resistivities: np.ndarray):
 
 
 def run_figure_4(args, preset: ReproductionPreset, root: Path) -> Path:
-    csv_path = root / "figure_4_twin_depinning.csv"
+    csv_path = root / "figure_4_magnetic_periodic_twin_depinning.csv"
     kappa = figure_kappa(args, "4")
-    field = (
-        args.fig4_field
-        if args.fig4_field is not None
-        else 2 * math.pi / DEFAULT_TWIN_SPACING**2
-    )
+    side = DEFAULT_TWIN_SPACING
+    induction = 2 * math.pi / side**2
     cases = [
         ("d, us=ud=0.5", -1.0, 0.5, 0.5, "v"),
         ("d+is, us=0.5", 0.85, 0.5, 0.5, "s"),
@@ -1092,30 +1041,26 @@ def run_figure_4(args, preset: ReproductionPreset, root: Path) -> Path:
         rows = read_csv(csv_path)
     else:
         rows = []
-        side = DEFAULT_TWIN_SPACING
-        width = args.twin_width or side / (preset.grid_points - 1)
+        width = args.twin_width or default_twin_width(side, preset.grid_points)
         for label, alpha_s, u_s, u_d, _ in cases:
             model = paper_model(alpha_s, 1.0, u_s=u_s, u_d=u_d)
-            device = make_square_device(
+            cell = make_square_cell(
                 model,
                 side_length=side,
                 grid_points=preset.grid_points,
                 kappa=kappa,
-                mesh_seed=args.mesh_seed,
+                flux_quanta=1,
             )
             disorder = twin_disorder_profile(u_d=u_d, width=width)
-            epsilon_values = disorder(device.mesh.sites, vectorized=True)
-            effective_u_d = float(
-                np.sum((1 - epsilon_values) * device.mesh.areas) / side
-            )
+            epsilon_values = disorder(cell.sites, vectorized=True)
+            effective_u_d = float(np.mean(1 - epsilon_values) * side)
             effective_u_s = effective_u_d * u_s / u_d
             eq_path = checkpoint_path(
-                root, "4", "equilibrium", alpha_s, u_s, u_d, field, width
+                root, "4", "equilibrium", alpha_s, u_s, u_d, induction, width
             )
             equilibrium = solve_or_load(
-                device,
+                cell,
                 equilibrium_options(preset, eq_path, model),
-                reduced_field_source(device, field),
                 alpha_s=alpha_s,
                 chirality=args.chirality,
                 disorder_epsilon=disorder,
@@ -1136,10 +1081,9 @@ def run_figure_4(args, preset: ReproductionPreset, root: Path) -> Path:
                     preset,
                     root,
                     figure="4",
-                    tag_parts=(alpha_s, u_s, u_d, field, width, current_value),
-                    device=device,
+                    tag_parts=(alpha_s, u_s, u_d, induction, width, current_value),
+                    cell=cell,
                     alpha_s=alpha_s,
-                    field=field,
                     current=np.array([current_value, 0.0]),
                     disorder_epsilon=disorder,
                     seed_solution=seed,
@@ -1162,11 +1106,17 @@ def run_figure_4(args, preset: ReproductionPreset, root: Path) -> Path:
                         "twin_width": width,
                         "effective_u_s": effective_u_s,
                         "effective_u_d": effective_u_d,
-                        "inferred_open_boundary_H_over_B0": field,
-                        "measured_B_over_B0": measured_b_over_b0,
+                        "fixed_B_over_B0": measured_b_over_b0,
                         "B_time_std_over_B0": b_std,
-                        "equilibrium_d_vortices": equilibrium_vortices,
-                        "driven_d_vortices": driven_vortices,
+                        "flux_quanta": 1,
+                        "equilibrium_d_vortex_sector": equilibrium_vortices,
+                        "driven_d_vortex_sector": driven_vortices,
+                        "equilibrium_d_vorticity_defined": bool(
+                            equilibrium.state.get("vorticity_defined", False)
+                        ),
+                        "driven_d_vorticity_defined": bool(
+                            driven.state.get("vorticity_defined", False)
+                        ),
                         "current": current_value,
                         "E_parallel": electric[0],
                         "E_parallel_block_error": abs(electric_delta[0]),
@@ -1198,12 +1148,12 @@ def run_figure_4(args, preset: ReproductionPreset, root: Path) -> Path:
     ax.set(
         xlabel=r"applied current $J$",
         ylabel=r"$\rho/\rho_n$",
-        title="Li-Wang-Wang Figure 4: open-boundary twin surrogate",
+        title="Li-Wang-Wang Figure 4: magnetic-periodic twin depinning",
     )
     ax.legend(fontsize=8)
     ax.grid(alpha=0.2)
     fig.tight_layout()
-    output = root / "figure_4_twin_depinning.png"
+    output = root / "figure_4_magnetic_periodic_twin_depinning.png"
     fig.savefig(output, dpi=250)
     plt.close(fig)
     return output
@@ -1244,7 +1194,12 @@ def _json_ready(value):
 
 def run_configuration(args, preset: ReproductionPreset) -> dict:
     """Return the simulation-defining payload used to isolate checkpoints."""
-    excluded = {"figures", "output_dir", "plot_only", "strict_vortex"}
+    excluded = {
+        "figures",
+        "output_dir",
+        "plot_only",
+        "strict_vortex",
+    }
     argument_values = {
         name: value for name, value in vars(args).items() if name not in excluded
     }
@@ -1289,35 +1244,37 @@ def write_manifest(
         "preset": args.preset,
         "preset_values": asdict(preset),
         "assumptions": {
-            "boundary_conditions": "open variational surrogate for magnetic-periodic cells",
-            "figure_2_alpha_s": args.fig2_alpha,
-            "figure_3_current": args.fig3_current,
-            "figure_4_field": (
-                args.fig4_field
-                if args.fig4_field is not None
-                else 2 * math.pi / DEFAULT_TWIN_SPACING**2
+            "boundary_conditions": (
+                "magnetic-periodic fixed-flux rectangular cells; common twisted "
+                "boundary condition for d and s"
             ),
+            "figure_2_alpha_s": args.fig2_alpha,
+            "figure_2_applied_field": (
+                "derived after fixed-B relaxation from "
+                "2*kappa^2*H*B=<f_grad>+2*kappa^2*<B^2>"
+            ),
+            "figure_3_current": args.fig3_current,
+            "figure_4_fixed_B": 2 * math.pi / DEFAULT_TWIN_SPACING**2,
+            "figure_4_cell_side": DEFAULT_TWIN_SPACING,
             "figure_4_fit_max_current": args.fig4_fit_max,
-            "strict_vortex": args.strict_vortex,
             "kappa_override": args.kappa,
             "effective_kappa": {
                 figure: figure_kappa(args, figure) for figure in ("2", "3", "4")
             },
             "chirality": args.chirality,
-            "mesh_seed": args.mesh_seed,
         },
         "paper_errata": {
             "figure_2_caption": "The PDF repeats the Figure 3 caption by mistake.",
         },
         "limitations": [
-            "No magnetic/twisted periodic boundary conditions.",
             "Figure 3 omits the q=0.01 relaxation branch.",
+            "Figure 2 emits virial H and mixed-state Gibbs points only after "
+            "the fixed-flux relaxation satisfies the equilibrium tolerance.",
             "The paper omits several run lengths, tolerances, and figure parameters.",
             "Twin delta functions are regularized with a finite-width unit-area top hat.",
-            "The open solver fixes boundary H; requested H and measured mean B differ.",
-            "Figure 3 converts the paper's B/Bc2 to open-boundary H/B0.",
+            "Figure 4 fixes the cell side to the 10.8 xi twin period, so its "
+            "one-flux induction cannot be overridden independently.",
             "Solver-clock durations are multiplied by beta_em=2/q.",
-            "A seeded vortex may escape; every CSV records its final net winding.",
         ],
     }
     with path.open("w") as stream:
@@ -1354,12 +1311,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--fig2-alpha", type=float, default=0.85)
     parser.add_argument("--fig3-current", type=float, default=DEFAULT_FIG3_CURRENT)
-    parser.add_argument(
-        "--fig4-field",
-        type=float,
-        default=None,
-        help="H/B0 for Fig. 4; default infers one flux quantum in 10.8 xi square.",
-    )
     parser.add_argument("--twin-width", type=float, default=None)
     parser.add_argument(
         "--fig4-fit-max",
@@ -1368,12 +1319,11 @@ def parse_args() -> argparse.Namespace:
         help="Maximum current included in the paper's stated low-J depinning fit.",
     )
     parser.add_argument("--chirality", type=int, choices=(-1, 1), default=1)
-    parser.add_argument("--mesh-seed", type=int, default=1999)
     parser.add_argument("--independent-currents", action="store_true")
     parser.add_argument(
         "--strict-vortex",
         action="store_true",
-        help="Fail instead of warning if the open cell loses its seeded vortex.",
+        help="Deprecated: the periodic backend always enforces the flux sector.",
     )
     args = parser.parse_args()
     if args.kappa is not None and args.kappa <= 0:

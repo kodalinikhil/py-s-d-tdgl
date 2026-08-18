@@ -23,8 +23,10 @@ from my_scripts.plots.goncalves_plotting import make_paper_mesh
 REDUCED_FIELDS = (1.040, 1.125)
 
 
-def make_device():
+def make_device(mesh_spacing=0.2):
     """Build the square and material parameters used by Goncalves et al."""
+    if mesh_spacing <= 0:
+        raise ValueError("mesh_spacing must be positive.")
     layer = tdgl.Layer(
         coherence_length=1.0,
         london_lambda=2.0,
@@ -41,7 +43,7 @@ def make_device():
     )
     film = tdgl.Polygon("film", points=tdgl.geometry.box(8, 8)).resample(160)
     device = tdgl.Device("goncalves_square", layer=layer, film=film)
-    points, triangles = make_paper_mesh()
+    points, triangles = make_paper_mesh(spacing=mesh_spacing)
     device._create_dimensionless_mesh(points, triangles)
     return device
 
@@ -231,6 +233,12 @@ def parse_args():
         help="Maximum dimensionless relaxation time (default: 1000).",
     )
     parser.add_argument(
+        "--mesh-spacing",
+        type=float,
+        default=0.2,
+        help="Target mesh spacing in units of xi (default: 0.2).",
+    )
+    parser.add_argument(
         "--continue-to",
         type=float,
         help="Continue existing HDF5 states to this cumulative time.",
@@ -243,7 +251,7 @@ def main():
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.continue_to is None:
-        device = make_device()
+        device = make_device(mesh_spacing=args.mesh_spacing)
         solutions = solve_at_fields(device, output_dir, args.solve_time)
     else:
         solutions = continue_to_time(output_dir, args.continue_to)

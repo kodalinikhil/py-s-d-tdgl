@@ -1,5 +1,5 @@
 #!/bin/bash
-# One-command macOS finite open-boundary framework scan for the d+d' model.
+# One-command macOS magnetic-periodic framework scan for the d+d' model.
 # Run from anywhere with:
 #   ./my_scripts/workflows/mac/run_d_plus_d_prime_demo_mac.sh
 #
@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-RUN_ID="${TDGL_RUN_ID:-mac_demo_$(date +%Y%m%d_%H%M%S)}"
+RUN_ID="${TDGL_RUN_ID:-mac_periodic_demo_$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${TDGL_OUTPUT_DIR:-$REPO_DIR/results/mac/$RUN_ID}"
 
 cd "$REPO_DIR"
@@ -59,6 +59,10 @@ if [[ "${TDGL_RESUME:-0}" != "0" && "${TDGL_RESUME:-0}" != "1" ]]; then
     echo "TDGL_RESUME must be 0 or 1, not: ${TDGL_RESUME:-}" >&2
     exit 2
 fi
+if [[ "${TDGL_SMOKE_TEST:-0}" != "0" && "${TDGL_SMOKE_TEST:-0}" != "1" ]]; then
+    echo "TDGL_SMOKE_TEST must be 0 or 1, not: ${TDGL_SMOKE_TEST:-}" >&2
+    exit 2
+fi
 
 set --
 if [[ "${TDGL_SMOKE_TEST:-0}" == "1" ]]; then
@@ -68,23 +72,21 @@ if [[ "${TDGL_RESUME:-0}" == "1" ]]; then
     set -- "$@" --resume
 fi
 
-echo "Running the macOS finite open-boundary d+d' framework scan with $PYTHON_BIN"
+echo "Running the macOS magnetic-periodic d+d' framework scan with $PYTHON_BIN"
 echo "Results: $OUTPUT_DIR"
 
 "$PYTHON_BIN" my_scripts/simulations/simulate_d_plus_d_prime_phase_diagram.py \
     --alphas 0.8 \
-    --fields 0,0.1,0.2,0.3,0.4,0.5,0.6,0.65,0.675,0.7,0.725,0.75,0.8 \
-    --width 8 \
-    --max-edge-length 0.4 \
-    --boundary-strip 1.5 \
-    --smooth 10 \
+    --fields 0,0.60,0.65,0.675,0.70,0.725,0.75,0.80 \
+    --grid-points 24 \
+    --aspect-ratio 1 \
     --solve-time 1500 \
-    --dt-init 0.0001 \
-    --dt-max 0.02 \
+    --dt-init 0.002 \
+    --dt-max 0.002 \
     --save-every 10000 \
     --progress-interval 2500 \
     --equilibrium-tolerance 1e-4 \
-    --equilibrium-window 500 \
+    --equilibrium-window 2500 \
     --equilibrium-min-time 20 \
     --no-down-sweep \
     --stop-after-pure-points 2 \

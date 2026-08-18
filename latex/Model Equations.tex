@@ -102,7 +102,7 @@ currents are divided by $\beta_{\rm em}$ on input and solution currents are
 multiplied by it on output, so the new coefficient is backward compatible at
 its default value one.
 
-For each model, current conservation is imposed through
+In the legacy arbitrary-mesh backend, current conservation is imposed through
 \begin{align}
     \mathbf j_n&=-\boldsymbol\nabla\mu-\partial_t\mathbf A,\\
     \boldsymbol\nabla^2\mu
@@ -113,7 +113,98 @@ For each model, current conservation is imposed through
 where $\mathbf j_s$ is the Poisson-normalized supercurrent specified for each
 model below.  The $d+d'$ model uses a prescribed vector potential.  The $s+d$
 and $s+s$ models can also implement the local electromagnetic evolution given
-in their respective sections below.
+in their respective sections below.  The standalone magnetic-periodic mode
+instead uses the source paper's temporal gauge $\mu=0$ and does not invoke the
+arbitrary-mesh scalar-potential solve.
+
+\section{Magnetic-periodic rectangular operator mode}
+
+The magnetic-periodic mode is a standalone structured-grid backend for a
+rectangular vortex cell
+$\Omega=[0,L_x)\times[0,L_y)$.  It is distinct from the legacy
+arbitrary-mesh backend: it neither adds seam edges to an open mesh nor applies
+physical boundary conditions on the perimeter of a finite sample.  A cell with
+$L_x$ and $L_y$ expressed in coherence-length units and
+$n\in\mathbb Z$ flux quanta has the fixed mean induction
+\begin{equation}
+    \overline B=\frac{2\pi n}{L_xL_y}.
+    \label{eq:mp-mean-field}
+\end{equation}
+In the Landau gauge $\overline{\mathbf A}=(0,\overline Bx)$, both condensates
+$\psi_\alpha$, $\alpha\in\{1,2\}$, obey the same magnetic translations,
+\begin{align}
+    \psi_\alpha(x+L_x,y)
+        &=e^{i\overline B L_x y}\psi_\alpha(x,y),
+    &\psi_\alpha(x,y+L_y)&=\psi_\alpha(x,y).
+    \label{eq:mp-translations}
+\end{align}
+Equation~\eqref{eq:mp-mean-field} makes the two translations consistent at a
+corner because $e^{i\overline B L_xL_y}=e^{i2\pi n}=1$.
+
+The evolved field is a periodic vector potential $\mathbf a$,
+\begin{equation}
+    \mathbf A=\overline{\mathbf A}+\mathbf a,\qquad
+    \mathbf a(x+L_x,y)=\mathbf a(x,y),\qquad
+    \mathbf a(x,y+L_y)=\mathbf a(x,y),\qquad
+    B=\overline B+(\boldsymbol\nabla\times\mathbf a)_z.
+    \label{eq:mp-field-split}
+\end{equation}
+Consequently,
+\begin{equation}
+    \int_\Omega B\,d^2r=\overline B L_xL_y=2\pi n,
+    \label{eq:mp-fixed-flux}
+\end{equation}
+since the integral of the curl of a periodic field vanishes.  There is no
+physical perimeter and hence no vacuum condition $B=H$.  An external $H$ may
+appear in a Gibbs-energy diagnostic through $\kappa^2(B-H)^2$, but it does not
+replace the fixed-flux constraint in the magnetic-periodic evolution.
+For a stationary nonzero-flux cell with spatially uniform GL coefficients,
+the applied field can be recovered in postprocessing from the virial
+relation~\cite{Doria1989},
+\begin{equation}
+    H_{\rm vir}
+      =\frac{\langle f_{\rm grad}\rangle
+              +2\kappa^2\langle B^2\rangle}
+             {2\kappa^2\overline B},
+    \qquad \overline B\ne0,
+    \label{eq:mp-virial}
+\end{equation}
+where $f_{\rm grad}$ includes both diagonal condensate stiffnesses and the
+mixed-gradient term.  This form is not used for a spatially fixed disorder
+profile, whose scaling adds an inhomogeneity contribution to the general
+virial theorem.
+
+On an $N_x\times N_y$ Cartesian grid, let $U^x_{ij}$ and $U^y_{ij}$ be the
+links of $\overline{\mathbf A}+\mathbf a$.  The structured covariant forward
+differences are
+\begin{align}
+    (D_x^h\psi)_{ij}
+      &=\frac{U^x_{ij}\psi_{i+1\bmod N_x,j}-\psi_{ij}}{h_x},\\
+    (D_y^h\psi)_{ij}
+      &=\frac{U^y_{ij}\psi_{i,j+1\bmod N_y}-\psi_{ij}}{h_y}.
+    \label{eq:mp-covariant-differences}
+\end{align}
+The wrap links contain the phases in Eq.~\eqref{eq:mp-translations}.  If $C$
+is the oriented bond-to-plaquette curl and $C^T$ its energy adjoint, then
+\begin{equation}
+    \mathbf B=\overline B\mathbf 1+C\mathbf a,\qquad
+    \beta_{\rm em}\dot{\mathbf a}
+       =\mathbf J_{\rm cond}-\mathbf J_{\rm drive}
+        -\kappa^2C^TC\mathbf a.
+    \label{eq:mp-maxwell}
+\end{equation}
+Thus the magnetic operator is the periodic positive-semidefinite curl--curl
+operator $C^TC$ and cannot change the mean flux.  By contrast, the legacy
+arbitrary-mesh operators retain their variational order-parameter boundary
+conditions and, for local screening, the physical-perimeter condition $B=H$.
+The two uniform harmonic link modes are retained.  A bulk drive can therefore
+advance the unwrapped uniform part of $\mathbf a$ and generate a nonzero mean
+$\mathbf E=-\partial_t\mathbf a$ without changing the flux sector.
+The initial standalone implementation is exposed through
+\texttt{MagneticPeriodicCell}, \texttt{MagneticPeriodicSolver},
+\texttt{MagneticPeriodicSolution}, and \texttt{solve\_magnetic\_periodic}.  It
+supports the $s+d$ model on the CPU with a static fixed-flux cell and local
+$\phi=0$ dynamics.
 
 \section{s+d \cite{Goncalves2014,Zhu1999,Li1999}}
 
@@ -208,13 +299,15 @@ With \texttt{include\_screening=True}, the vector potential obeys
     \qquad B=(\boldsymbol\nabla\times\mathbf A)_z,
 \end{equation}
 which is Eq.~(19) of Gon\c{c}alves \textit{et al.} in the $\phi=0$ gauge.
-The implementation writes $\mathbf A=\mathbf A_{\rm applied}
+The legacy arbitrary-mesh implementation writes
+$\mathbf A=\mathbf A_{\rm applied}
 +\mathbf A_{\rm induced}$ and applies magnetic diffusion to
 $B-H=\boldsymbol\nabla\times\mathbf A_{\rm induced}$.  This is equivalent to
 the paper's $B=H$ vacuum boundary condition for a uniform applied field and
 remains variationally consistent for a nonuniform prescribed field.
 
-For an insulating boundary with outward normal $\mathbf n$, the natural
+For an insulating boundary of the legacy arbitrary-mesh backend, with outward
+normal $\mathbf n$, the natural
 order-parameter conditions generated by the same gradient functional are
 \begin{align}
   \mathbf n\!\cdot\!\mathbf D\psi_d
@@ -502,9 +595,9 @@ phase boundary of Ref.~\cite{Lei2000} must use $g_Z=0$; nonzero values instead
 implement the microscopic extension of Ref.~\cite{Wang1999Orbital}.
 
 The model has equal component stiffnesses, no mixed-gradient term, and fixed
-quadratic coefficients, so nonuniform \texttt{disorder\_epsilon} is unsupported.
-Transport terminals require \texttt{terminal\_psi=None} and natural
-order-parameter boundary conditions.
+quadratic coefficients.  A nonuniform disorder profile is unsupported.
+Transport terminals are disabled; only natural order-parameter boundary
+conditions are supported.
 
 \section{s+s and s+is \cite{Zhitomirsky2004,Kogan2011,Lin2016}}
 
@@ -589,14 +682,16 @@ With \texttt{include\_screening=True}, local electromagnetic relaxation uses
   \qquad B=(\boldsymbol\nabla\times\mathbf A)_z.
   \label{eq:ss-screening}
 \end{equation}
-The implementation evolves $B-H$ with the boundary condition $B=H$.  Local
+The legacy arbitrary-mesh implementation evolves $B-H$ with the physical
+boundary condition $B=H$.  Local
 screening requires $c_{\rm em}=1$ so that Eq.~\eqref{eq:ss-screening} is the
 variation of the same free energy as Eqs.~\eqref{eq:ss-1}--\eqref{eq:ss-2}.
 Prescribed-vector-potential simulations retain arbitrary positive
 $c_{\rm em}$.  In both modes, stored currents use Eq.~\eqref{eq:ss-current};
 public physical currents restore the factor $\beta_{\rm em}$.
 
-The variational insulating-boundary conditions are coupled when $k_{12}\ne0$:
+The legacy arbitrary-mesh variational insulating-boundary conditions are
+coupled when $k_{12}\ne0$:
 \begin{align}
   \mathbf n\!\cdot\!\mathbf D\psi_1
     +k_{12}\mathbf n\!\cdot\!\mathbf D\psi_2&=0,\\
@@ -865,6 +960,13 @@ Q.~Li, Z.~D. Wang, and Q.-H. Wang,
 ``Vortex dynamics of a $d+is$-wave superconductor,''
 arXiv:cond-mat/9906211 (1999).
 \href{https://doi.org/10.48550/arXiv.cond-mat/9906211}{doi:10.48550/arXiv.cond-mat/9906211}.
+
+\bibitem{Doria1989}
+M.~M. Doria, J.~E. Gubernatis, and D.~Rainer,
+``Virial theorem for Ginzburg--Landau theories with potential applications to
+numerical studies of type-II superconductors,''
+\textit{Physical Review B} \textbf{39}, 9573 (1989).
+\href{https://doi.org/10.1103/PhysRevB.39.9573}{doi:10.1103/PhysRevB.39.9573}.
 
 \bibitem{Zhu1999}
 J.-X. Zhu, W.~Kim, C.~S. Ting, and C.-R. Hu,

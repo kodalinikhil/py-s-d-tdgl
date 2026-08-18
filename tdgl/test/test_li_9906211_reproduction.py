@@ -1,23 +1,22 @@
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
-
 from my_scripts.reproductions.reproduce_li_wang_wang_cond_mat_9906211 import (
     PRESETS,
     b_over_b0_from_bc2_fraction,
+    default_twin_width,
     drive_options,
     equilibrium_options,
     fit_depinning_curve,
-    global_vector_from_tangential,
     hc2_over_b0,
-    li_vortex_seed,
-    net_vortex_count,
+    li_periodic_vortex_seed,
+    make_square_cell,
     one_flux_cell_side,
     paper_model,
     parse_figures,
     uniform_li_state,
 )
+
+from tdgl.magnetic_periodic.operators import MagneticPeriodicOperators
 
 
 def test_mixed_hc2_conversion_uses_linearized_determinant_roots():
@@ -52,6 +51,42 @@ def test_one_flux_cell_and_reduced_field_mappings():
     )
 
 
+def test_periodic_cell_uses_unique_sites_and_exact_fixed_flux():
+    induction = 0.2
+    side = one_flux_cell_side(induction)
+    grid_points = 7
+    cell = make_square_cell(
+        paper_model(0.85),
+        side_length=side,
+        grid_points=grid_points,
+        kappa=3.0,
+        flux_quanta=1,
+    )
+
+    assert cell.shape == (grid_points, grid_points)
+    assert cell.num_sites == grid_points**2
+    assert cell.dx == pytest.approx(side / grid_points)
+    assert cell.dy == pytest.approx(side / grid_points)
+    assert cell.x[-1] < cell.origin[0] + side
+    assert cell.y[-1] < cell.origin[1] + side
+    assert cell.mean_induction == pytest.approx(induction)
+    assert default_twin_width(side, grid_points) == pytest.approx(side / grid_points)
+
+
+def test_periodic_vortex_seed_avoids_sites_and_has_fixed_sector():
+    cell = make_square_cell(
+        paper_model(0.85),
+        side_length=one_flux_cell_side(0.2),
+        grid_points=7,
+        kappa=3.0,
+        flux_quanta=1,
+    )
+    d_order, _ = li_periodic_vortex_seed(cell, 0.85, chirality=1, num_vortices=1)
+
+    assert np.all(np.abs(d_order) > 0)
+    assert MagneticPeriodicOperators(cell).vortex_count(d_order) == 1
+
+
 def test_d_stiffness_clock_and_relative_s_kinetics_map_the_paper():
     q = 0.2
     model = paper_model(0.85, q)
@@ -69,6 +104,8 @@ def test_d_stiffness_clock_and_relative_s_kinetics_map_the_paper():
     )
     assert driven.skip_time == pytest.approx(preset.drive_skip_time * model.beta_em)
     assert driven.solve_time == pytest.approx(preset.drive_measure_time * model.beta_em)
+    assert equilibrium.adaptive is True
+    assert driven.adaptive is True
 
 
 def test_uniform_d_plus_is_seed_is_a_stationary_bulk_state():
@@ -98,29 +135,7 @@ def test_uniform_d_plus_is_seed_is_a_stationary_bulk_state():
     assert abs(s_at_endpoint) == pytest.approx(np.sqrt(3 / 4))
 
 
-def test_vortex_seed_has_one_net_d_winding():
-    sites = np.array([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])
-    elements = np.array([[0, 1, 2], [0, 2, 3]])
-    mesh = SimpleNamespace(sites=sites, elements=elements)
-    d_order, _ = li_vortex_seed(sites, 0.85, chirality=1, num_vortices=1)
-    assert net_vortex_count(mesh, d_order) == 1
-
-
-def test_global_vector_reconstruction_and_depinning_fit():
-    sites = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
-    elements = np.array([[0, 1, 2], [0, 2, 3]])
-    edges = np.array([[0, 1], [1, 2], [0, 2], [2, 3], [0, 3]])
-    directions = sites[edges[:, 1]] - sites[edges[:, 0]]
-    directions /= np.linalg.norm(directions, axis=1)[:, None]
-    edge_mesh = SimpleNamespace(
-        normalized_directions=directions,
-        edges=edges,
-    )
-    mesh = SimpleNamespace(edge_mesh=edge_mesh, sites=sites, elements=elements)
-    vector = np.array([0.13, -0.27])
-    reconstructed = global_vector_from_tangential(mesh, directions @ vector)
-    assert reconstructed == pytest.approx(vector)
-
+def test_depinning_fit():
     currents = np.linspace(0.1, 0.3, 21)
     critical, amplitude = 0.14, 0.73
     resistivity = amplitude * np.sqrt(np.maximum(0.0, 1.0 - (critical / currents) ** 2))
