@@ -7,9 +7,22 @@ import matplotlib.tri as mtri
 import numpy as np
 from tqdm import tqdm
 
-from ..device.models import SPlusDModel
+from ..device.models import SPlusDModel, SPlusSModel
 from ..finite_volume.mesh import Mesh
 from ..geometry import path_vectors
+
+
+def get_current_scale(device):
+    """Return the physical scale for normalized solver current datasets.
+
+    ``SPlusDModel`` and ``SPlusSModel`` divide stored currents by ``beta_em``
+    for their electromagnetic equations, so solution diagnostics multiply that
+    factor back into the base sheet-current scale.
+    """
+    scale = device.K0
+    if isinstance(device.layer.model, (SPlusDModel, SPlusSModel)):
+        scale *= getattr(device.layer.model, "beta_em", 1)
+    return scale
 
 
 def get_data_range(h5file: h5py.File) -> Tuple[int, int]:
@@ -81,8 +94,9 @@ class TDGLData:
         induced_vector_potential: The induced vector potential at each edge in the mesh.
         supercurrent: The supercurrent density at each edge in the mesh. For
             multi-component models this is the Poisson-normalized condensate
-            current (``J_s / beta_em`` for ``SPlusDModel`` and
-            ``J_s / em_coupling`` for ``DPlusDPrimeModel`` and ``SPlusSModel``).
+            current (``J_s / beta_em`` for ``SPlusDModel``,
+            ``J_s / em_coupling`` for ``DPlusDPrimeModel``, and
+            ``J_s / (em_coupling * beta_em)`` for ``SPlusSModel``).
         normal_current: The normal density at each edge in the mesh.
         state: The solver state for the current iteration.
     """
@@ -367,8 +381,8 @@ class DynamicsData:
             )
         bx.plot(ts[indices], phases[indices])
         if labels:
-            ax.set_ylabel(f"Voltage\n$\\Delta\\mu_{{{i},{j}}}$ [$V_0$]")
-            bx.set_xlabel("Time, $t$ [$\\tau_0$]")
+            ax.set_ylabel(f"Dimensionless voltage\n$\\Delta\\mu_{{{i},{j}}}$")
+            bx.set_xlabel("Dimensionless time, $t$")
             bx.set_ylabel(f"Phase difference\n$\\Delta\\theta_{{{i},{j}}}/\\pi$")
         if legend:
             ax.legend(loc=0)
@@ -408,8 +422,8 @@ class DynamicsData:
         histogram_kwargs["orientation"] = "horizontal"
         bx.hist(self.dt[indices], **histogram_kwargs)
         if labels:
-            ax.set_xlabel("Time, $t$ [$\\tau_0$]")
-            ax.set_ylabel("Time step, $\\Delta t$ [$\\tau_0$]")
+            ax.set_xlabel("Dimensionless time, $t$")
+            ax.set_ylabel("Dimensionless time step, $\\Delta t$")
             if histogram_kwargs.get("density", False):
                 bx.set_xlabel("Density")
             else:
@@ -678,7 +692,7 @@ def get_current_through_paths(
 
     currents = []
     for current in raw_currents:
-        J = current * (device.K0 * length_units).to(units)
+        J = current * (get_current_scale(device) * length_units).to(units)
         if not with_units:
             J = J.magnitude
         currents.append(J)

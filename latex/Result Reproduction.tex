@@ -40,10 +40,13 @@
 \section{Goncalves et al., ``Numerical solution of the time dependent Ginzburg-Landau equations for mixed (d + s)-
 wave superconductors"}
 
-We try to reproduce section VIII, the paper's computational results. 
-The parameters are $\kappa_D = 2, \tau_1=8/3, \tau_3=16/3, \tau_4=2, \nu=-2, \eta_s=2, \eta_v=1$. Note that these correspond to microscopically derived coefficients from other papers. The square film has dimensions $8\xi_D$ x $8\xi_D$.
-The grid starts off with (everywhere) $\psi_D=1$, $\psi_S=0$, $\v{B}=0$. In the paper, they gradually sweep the field up to $2.5H_{c2}$ and back down to $0$.
-My computer only had the capability to step in intervals of $0.5H_{c2}$, which probably accounts for the differences in behavior below. Another possibility is that solving on a mesh rather than a grid causes differences, but I think that's less likely.
+We reproduce the results in Sec.~VIII using
+$\kappa_D=2$, $\tau_1=8/3$, $\tau_3=16/3$, $\tau_4=2$, $\nu=-2$,
+$\eta_s=2$, and $\eta_v=1$.  The $8\xi_D\times8\xi_D$ film starts from
+$\psi_D=1$, $\psi_S=0$, and $\mathbf B=0$.  The paper sweeps gradually to
+$2.5H_{c2}$ and back to zero.  We use $0.25H_{c2}$ steps plus
+$H/H_{c2}=1.040$, $1.125$, and $1.260$, so barrier crossings may occur at
+different fields.
 
 \begin{figure}[H]
     \centering
@@ -53,23 +56,86 @@ My computer only had the capability to step in intervals of $0.5H_{c2}$, which p
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=\linewidth]{images/goncalves_reprod_h_dependence.png}
-    \caption{Reproduced field dependence using a sweep interval of $0.5H_{c2}$.}
+    \includegraphics[width=\linewidth]{images/goncalves_h_dependence.png}
+    \caption{Our transition-refined field continuation.  Blue circles show the
+    increasing-field branch and red squares show the decreasing-field branch.}
+    \label{fig:goncalves-field-dependence}
 \end{figure}
 
-One issue, among many other differences (due to my intervals), is that there is no vortex remaining when the system gets back to $H = 0$. However, the vortex count seems to roughly track otherwise.
+The density trends and overall increase in vortex count are reproduced, with
+the largest branch differences near vortex transitions.  Unlike the paper, our
+return state contains no vortex at $H=0$.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{images/goncalves_trapped_flux.png}
+    \caption{Final return-leg state at $H=0$, with no trapped vortex.}
+    \label{fig:goncalves-return-state}
+\end{figure}
+
+\subsection{Attempts to reproduce Fig.~6}
 
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.85\textwidth]{images/goncalves_fig6.png}
-
-    \vspace{0.5em}
-
-    \includegraphics[width=0.8\textwidth]{images/goncalves_reprod_d_wave_H_1.040_1.125.png}
-    \caption{Reference (top) and reproduced (bottom) $d$-wave vortex configurations near $H/H_{c2}=1.1$.}
+    \caption{Goncalves \textit{et al.}: six vortices at $H/H_{c2}=1.040$
+    (left) and $1.125$ (right).}
+    \label{fig:goncalves-fig6}
 \end{figure}
 
-I tried to reproduce the plots in Goncalves's figure 6 by going straight from $H=0$ to the desired values, but again hysteresis seems to cause behavioral differences (in mine there are 8 vortices rather than 6).
+We tested three field histories.  The \emph{up sweep}, seeded from the next
+lower field, gives five vortices at $H/H_{c2}=1.040$ and six at $1.125$
+(Fig.~\ref{fig:goncalves-up}).  Only the latter count agrees with the paper.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{images/goncalves_sweep_up_d_wave_H_1.040_1.125.png}
+    \caption{Increasing-field continuation at the two Fig.~6 fields: five
+    vortices at $H/H_{c2}=1.040$ and six at $1.125$.}
+    \label{fig:goncalves-up}
+\end{figure}
+
+The \emph{down sweep}, seeded from the next higher field after reaching
+$2.5H_{c2}$, retains seven vortices at $H/H_{c2}=1.040$ and eight at $1.125$
+(Fig.~\ref{fig:goncalves-down}).
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[c]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/goncalves_sweep_down_d_wave_H_1.040.png}
+    \end{minipage}\hfill
+    \begin{minipage}[c]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/goncalves_sweep_down_d_wave_H_1.125.png}
+    \end{minipage}
+    \caption{Decreasing-field continuation at the two Fig.~6 fields: seven
+    vortices at $H/H_{c2}=1.040$ and eight at $1.125$.}
+    \label{fig:goncalves-down}
+\end{figure}
+
+The \emph{straight jump} solves each target directly from the zero-field
+state.  It also gives seven and eight vortices, matching the down sweep rather
+than the up sweep.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\linewidth]{images/goncalves_d_wave_H_1.040_1.125.png}
+    \caption{Straight jumps to $H/H_{c2}=1.040$ and $1.125$, yielding seven
+    and eight vortices as on the down sweep.}
+    \label{fig:goncalves-jump}
+\end{figure}
+
+The straight jump suppresses the boundary condensate, admitting vortices
+before the edge barrier reforms.  It thus reaches the high-vorticity
+metastable basin retained on the down sweep, while small up-sweep steps remain
+in a lower-vorticity basin.  This match does not establish a unique equilibrium.
+
+Remaining differences likely arise from three sources: the triangular
+Delaunay/Voronoi mesh changes numerical symmetry, edge barriers, and pinning;
+the unspecified $\beta_{\mathrm{em}}$ (set to $1$ here) changes the finite-time
+path, though not the stationary equations; and our coarser field steps can
+cross several vortex thresholds near $H/H_{c2}=1.040$ and $1.125$.
 
 \clearpage
 \section{Xu, Ren, Ting, ``Structures of single vortex and vortex lattice in a d-wave superconductor"}
@@ -104,21 +170,218 @@ The single-vortex magnitude and magnetic-field profiles reported by Xu, Ren, and
     \label{fig:xurenting-field-phases}
 \end{figure}
 
-The corresponding simulation using the Goncalves parameters, a centered circular defect of radius $0.5\xi$, and $H/H_{c2}=0.5$ is shown below. The level curves show the order-parameter magnitudes and magnetic fields, while the arrows show the phases of $\psi_d$ and $\psi_s$.
+For comparison, we use the defect-free $H/H_{c2}=0.5$ state from the
+decreasing-field branch of the Goncalves sweep.  This state was continued down
+from $2.5H_{c2}$ and contains one vortex.  The level curves show the
+order-parameter magnitudes and magnetic fields, while the arrows show the
+phases of $\psi_d$ and $\psi_s$.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.96\textwidth]{images/XuRenTing_defect_r0.5_H_0.5.png}
-    \caption{Xu--Ren--Ting-inspired defect simulation at $H/H_{c2}=0.5$.}
+    \includegraphics[width=0.96\textwidth]{images/XuRenTing_goncalves_downsweep_H_0.5.png}
+    \caption{Defect-free Goncalves down-sweep state at $H/H_{c2}=0.5$,
+    plotted using the observables reported by Xu, Ren, and Ting.}
     \label{fig:xurenting-reproduction}
 \end{figure}
+
+Seems to roughly match. The paper does not provide the specific conditions for its vortex, so this is about as good as a result as we can get.
 
 \clearpage
 \section{Lin et al., ``Distinguishing between s+id and s+is pairing symmetries
 in multiband superconductors through spontaneous
 magnetization pattern induced by a defect"}
 
+We reproduced the two most direct defect signatures in Figs.~3 and 4 using
+the paper's GL coefficients and square-defect profiles.  The calculations use
+\path{my_scripts/reproduce_lin_maiti_chubukov_prb94_064519.py}, a
+$D_4$-symmetric triangular mesh, $\kappa_1=4$, explicit chiral initial states,
+and subtraction of the corresponding zero-defect numerical field.
+
+For direct comparison, the paper's original Figs.~3 and 4 are shown first.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.72\textwidth]{images/lin2016_figure3_original.png}
+    \caption{Original Fig.~3 from Lin \textit{et al.}, showing the quadratic
+    $s+is$ and linear $s+id$ defect-strength scaling.}
+    \label{fig:lin2016-original-scaling}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{images/lin2016_figure4_original.png}
+    \caption{Original Fig.~4 from Lin \textit{et al.}, showing the fourfold
+    $s+is$ and twofold $s+id$ square-defect magnetization patterns.}
+    \label{fig:lin2016-original-patterns}
+\end{figure}
+
+\clearpage
+Our corresponding finite-domain reproductions are shown below.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.82\textwidth]{images/lin2016_figure3_scaling.png}
+    \caption{Reproduction of the Fig.~3 scaling test for a square defect with
+    $r_0=1.5\xi_1$.  The fitted powers are $2.07$ for $s+is$ and $1.02$ for
+    $s+id$, consistent with the predicted quadratic and linear responses.}
+    \label{fig:lin2016-scaling}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{images/lin2016_figure4_patterns.png}
+    \caption{Reproduction of the Fig.~4 square-defect patterns for
+    $\widetilde\alpha=0.5$ and $r_0=\xi_1$.  The $s+is$ field has fourfold
+    alternating corner structure, whereas $s+id$ has the expected twofold
+    diagonal structure.  Independent symmetric color scales are used because
+    the two field amplitudes differ by several orders of magnitude.}
+    \label{fig:lin2016-patterns}
+\end{figure}
+
+These runs reproduce the symmetry and defect-strength scaling rather than an
+absolute field calibration: the paper does not specify the penetration depth,
+finite domain, mesh, boundary conditions, or relaxation parameters.
+
+\clearpage
+
 \section{Lei et al., ``Field Driven Pairing State Phase Transition
 in $d_{x^2-y^2} + id_{xy}$-Wave Superconductors"}
+
+\textbf{We run into major issues in this section because we do not use the magnetic periodic boundary conditions of the paper.}
+
+\section{Babaev et al., ``Type-1.5 Superconducting State from an Intrinsic Proximity Effect
+in Two-Band Superconductors''}
+
+We reproduce the intervortex interaction curves and radial profiles on a
+$96\times96$ grid.  The paper's original Figs.~1, 4, and 5 are shown first.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.64\linewidth]{images/Babaev_fig1.png}
+    \caption{Original Fig.~1: nonmonotonic intervortex interaction in the
+    weak interband-coupling regime.}
+    \label{fig:babaev-original-fig1}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.64\linewidth]{images/Babaev_fig4.png}
+    \caption{Original Fig.~4: intervortex interaction for stronger interband
+    coupling.}
+    \label{fig:babaev-original-fig4}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.82\linewidth]{images/Babaev_fig5.png}
+    \caption{Original Fig.~5: radial condensate and magnetic-field profiles.}
+    \label{fig:babaev-original-fig5}
+\end{figure}
+
+\clearpage
+Our corresponding $s+s$ results are shown below.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.72\linewidth]{images/figure1_interaction.png}
+    \caption{Reproduction of the Fig.~1 interaction curve.}
+    \label{fig:babaev-reproduction-fig1}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.72\linewidth]{images/figure4_interaction.png}
+    \caption{Reproduction of the Fig.~4 interaction curve.}
+    \label{fig:babaev-reproduction-fig4}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{images/figure5_profiles.png}
+    \caption{Reproduction of the Fig.~5 condensate and magnetic-field
+    profiles.}
+    \label{fig:babaev-reproduction-fig5}
+\end{figure}
+
+The $s+s$ calculation reproduces the attractive long-range and repulsive
+short-range interaction, its change with interband coupling, and the unequal
+core-length scales.  Small quantitative differences reflect the finite
+domain, grid resolution, and values digitized from the paper.
+
+\clearpage
+\section{Li et al., ``Vortex dynamics of a d + is-wave superconductor''}
+
+We mapped Li \textit{et al.}'s parameters and relaxation factors onto the
+$s+d$ TDGL model.  The \texttt{quick} runs use a $13\times13$ mesh,
+$\Delta t=2\times10^{-3}$, and the paper's one-flux-quantum cell area.
+Figure~3 includes $q=1$ and $q=10$ only.  Because our boundaries differ from
+the paper's, these are open-cell surrogates rather than exact reproductions.
+
+\subsection{Gibbs-energy branches}
+
+Although the paper repeats a flux-flow caption for Fig.~2, its axes and text
+identify a Gibbs-energy construction.  Our mixed branch rises similarly
+toward the normal state.  All 16 samples have the expected winding, but only
+one reaches the strict \texttt{quick} equilibrium tolerance.
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[c]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/li_fig2.png}
+    \end{minipage}\hfill
+    \begin{minipage}[c]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/li_fig2_reproduction.png}
+    \end{minipage}
+    \caption{Li \textit{et al.} Fig.~2 (left) and our open-boundary Gibbs
+    surrogate (right); $H$ is the boundary field and $B$ the measured mean
+    induction.}
+    \label{fig:li-fig2-comparison}
+\end{figure}
+
+Note that the caption for figure 2 in the paper is not correct; they seem to have misplaced it.
+
+\clearpage
+\subsection{Free flux-flow resistivity}
+
+\textbf{We run into major issues in this section because we do not use the magnetic periodic boundary conditions of the paper.}
+
+The $q=1$ response rises faster than $q=10$, matching the paper's ordering.
+However, only 7 of 32 equilibria converge strictly and 16 of 64 driven runs
+retain the $+1$ winding sector, so this is not quantitative fixed-vortex flux
+flow.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.66\linewidth]{images/li_fig3.png}\\[0.3em]
+    \includegraphics[width=0.66\linewidth]{images/li_fig3_reproduction.png}
+    \caption{Li \textit{et al.} Fig.~3 (top) and our $q=1,10$
+    open-boundary vortex-flow surrogate (bottom).}
+    \label{fig:li-fig3-comparison}
+\end{figure}
+
+\clearpage
+\subsection{Twin-boundary depinning}
+
+The sweep does not recover the sharply pinned low-current regime.  Only one
+of four initial equilibria converges strictly and 6 of 40 driven runs retain
+the $+1$ winding sector; after a sector change, $E/J$ no longer measures
+single-vortex depinning.
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[c]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/li_fig4.png}
+    \end{minipage}\hfill
+    \begin{minipage}[c]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/li_fig4_reproduction.png}
+    \end{minipage}
+    \caption{Li \textit{et al.} Fig.~4 (left) and our open-boundary
+    twin-depinning surrogate (right).}
+    \label{fig:li-fig4-comparison}
+\end{figure}
 
 \end{document}

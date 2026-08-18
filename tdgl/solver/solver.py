@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
+import scipy.optimize as spo
 import scipy.sparse as sp
 
 try:
@@ -31,6 +32,32 @@ from .runner import DataHandler, Runner, RunningState
 from .screening import get_A_induced_cupy, get_A_induced_numba
 
 logger = logging.getLogger("solver")
+
+
+def _check_terminal_currents(
+    currents: Dict[str, float], terminal_info: Sequence[TerminalInfo]
+) -> None:
+    """Validate one terminal-current mapping at a specific time."""
+    if not isinstance(currents, dict):
+        raise TypeError("Terminal current callables must return a dict.")
+    names = {terminal.name for terminal in terminal_info}
+    if unknown := set(currents).difference(names):
+        raise ValueError(
+            f"Unknown terminal(s) in terminal currents: {sorted(unknown)}."
+        )
+    values = []
+    for name, value in currents.items():
+        if not isinstance(value, numbers.Real) or isinstance(value, bool):
+            raise TypeError(f"Current for terminal {name!r} must be a real number.")
+        if not math.isfinite(value):
+            raise ValueError(f"Current for terminal {name!r} must be finite.")
+        values.append(float(value))
+    total_current = math.fsum(values)
+    scale = max(1.0, math.fsum(abs(value) for value in values))
+    if not math.isclose(total_current, 0.0, rel_tol=0.0, abs_tol=1e-12 * scale):
+        raise ValueError(
+            f"The sum of all terminal currents must be 0 (got {total_current:.2e})."
+        )
 
 
 def get_outward_boundary_normals(mesh) -> np.ndarray:
@@ -72,25 +99,111 @@ def validate_terminal_currents(
     num_evals: int = 100,
 ) -> None:
     """Ensure that the terminal currents satisfy current conservation."""
-
-    def check_total_current(currents: Dict[str, float]):
-        names = set([t.name for t in terminal_info])
-        if unknown := set(currents).difference(names):
-            raise ValueError(
-                f"Unknown terminal(s) in terminal currents: {list(unknown)}."
-            )
-        total_current = sum(currents.values())
-        if total_current:
-            raise ValueError(
-                f"The sum of all terminal currents must be 0 (got {total_current:.2e})."
-            )
-
     if callable(terminal_currents):
-        times = np.random.default_rng().random(num_evals) * solver_options.solve_time
+        times = np.linspace(0.0, solver_options.solve_time, max(2, num_evals))
         for t in times:
-            check_total_current(terminal_currents(t))
+            _check_terminal_currents(terminal_currents(float(t)), terminal_info)
     else:
-        check_total_current(terminal_currents)
+        _check_terminal_currents(terminal_currents, terminal_info)
+
+
+def _s_plus_s_uniform_state(model: SPlusSModel) -> Tuple[complex, complex]:
+    """Return a deterministic homogeneous minimum for ``SPlusSModel``.
+
+    The legacy model initialized each band at its uncoupled amplitude and used
+    only the Josephson-preferred sign.  Preserve that exact behavior when the
+    new interband quartics vanish.  Once either quartic is enabled, minimize the
+    complete homogeneous potential over two nonnegative amplitudes and one
+    relative phase.  Restricting the phase to ``[0, pi]`` chooses one member of
+    a time-reversed pair deterministically; a conjugated seed solution selects
+    the opposite chirality.
+    """
+
+    def uncoupled_amplitude(a: float, b: float) -> float:
+        if b > 0 and a < 0:
+            return max(math.sqrt(-a / b), 1e-4)
+        return 1e-4
+
+    amp1 = uncoupled_amplitude(model.a1, model.b1)
+    amp2 = uncoupled_amplitude(model.a2, model.b2)
+    if model.phase_gamma2 == 0 and model.density_gamma3 == 0:
+        relative_sign = -1.0 if model.josephson_gamma < 0 else 1.0
+        return complex(amp1), complex(relative_sign * amp2)
+
+    def potential(values: np.ndarray) -> float:
+        u1, u2, theta = values
+        rho1 = u1 * u1
+        rho2 = u2 * u2
+        return float(
+            model.a1 * rho1
+            + 0.5 * model.b1 * rho1 * rho1
+            + model.a2 * rho2
+            + 0.5 * model.b2 * rho2 * rho2
+            + 0.5 * model.density_gamma3 * rho1 * rho2
+            + model.phase_gamma2 * rho1 * rho2 * math.cos(2 * theta)
+            - 2 * model.josephson_gamma * u1 * u2 * math.cos(theta)
+        )
+
+    def gradient(values: np.ndarray) -> np.ndarray:
+        u1, u2, theta = values
+        cos_theta = math.cos(theta)
+        cos_two_theta = math.cos(2 * theta)
+        common = model.density_gamma3 + 2 * model.phase_gamma2 * cos_two_theta
+        return np.array(
+            [
+                2 * model.a1 * u1
+                + 2 * model.b1 * u1**3
+                + common * u1 * u2**2
+                - 2 * model.josephson_gamma * u2 * cos_theta,
+                2 * model.a2 * u2
+                + 2 * model.b2 * u2**3
+                + common * u2 * u1**2
+                - 2 * model.josephson_gamma * u1 * cos_theta,
+                -2 * model.phase_gamma2 * u1**2 * u2**2 * math.sin(2 * theta)
+                + 2 * model.josephson_gamma * u1 * u2 * math.sin(theta),
+            ],
+            dtype=float,
+        )
+
+    scale1 = max(amp1, 1.0)
+    scale2 = max(amp2, 1.0)
+    starts = [
+        np.array([amp1, amp2, theta], dtype=float)
+        for theta in (0.0, math.pi / 2, math.pi)
+    ]
+    starts.extend(
+        np.array([scale1, scale2, theta], dtype=float)
+        for theta in (0.0, math.pi / 2, math.pi)
+    )
+    starts.extend(
+        [
+            np.array([amp1, 0.0, 0.0], dtype=float),
+            np.array([0.0, amp2, 0.0], dtype=float),
+            np.zeros(3, dtype=float),
+        ]
+    )
+
+    best_values = starts[0]
+    best_energy = potential(best_values)
+    bounds = ((0.0, None), (0.0, None), (0.0, math.pi))
+    for start in starts:
+        result = spo.minimize(
+            potential,
+            start,
+            jac=gradient,
+            bounds=bounds,
+            method="L-BFGS-B",
+        )
+        values = result.x if result.success and np.all(np.isfinite(result.x)) else start
+        energy = potential(values)
+        if energy < best_energy:
+            best_values = values
+            best_energy = energy
+
+    u1, u2, theta = best_values
+    u1 = max(float(u1), 1e-4)
+    u2 = max(float(u2), 1e-4)
+    return complex(u1), u2 * np.exp(1j * float(theta))
 
 
 class SolverResult(NamedTuple):
@@ -188,10 +301,47 @@ class TDGLSolver:
         validate_model = getattr(self.model, "validate", None)
         if validate_model is not None:
             validate_model()
-        if (
-            isinstance(self.model, (SPlusDModel, DPlusDPrimeModel, SPlusSModel))
-            and options.include_screening
+        self.goncalves_screening = isinstance(self.model, SPlusDModel) and (
+            options.include_screening
+        )
+        self.s_plus_s_screening = isinstance(self.model, SPlusSModel) and (
+            options.include_screening
+        )
+        self.local_screening = self.goncalves_screening or self.s_plus_s_screening
+        if self.local_screening and self.use_cupy:
+            raise ValueError(
+                "Local multicomponent screening currently requires the CPU sparse "
+                "solver."
+            )
+        if self.local_screening and terminal_currents is not None:
+            if callable(terminal_currents) or any(terminal_currents.values()):
+                raise ValueError(
+                    "Local multicomponent screening uses the phi=0 vacuum-boundary "
+                    "problem and does not support terminal current injection."
+                )
+        if self.s_plus_s_screening and not math.isclose(
+            self.model.em_coupling, 1.0, rel_tol=0.0, abs_tol=1e-12
         ):
+            raise ValueError(
+                "SPlusSModel local screening requires em_coupling=1 so that the "
+                "condensate current and magnetic free energy use one variational "
+                "normalization."
+            )
+        drive_current = np.array(
+            [
+                options.s_plus_d_drive_current_x,
+                options.s_plus_d_drive_current_y,
+            ],
+            dtype=float,
+        )
+        if np.any(drive_current) and not self.goncalves_screening:
+            raise ValueError(
+                "The s+d bulk drive current requires SPlusDModel with "
+                "include_screening=True."
+            )
+        self.s_plus_d_drive_current = drive_current
+        self.s_plus_d_drive_tangent = normalized_directions @ drive_current
+        if isinstance(self.model, DPlusDPrimeModel) and options.include_screening:
             raise ValueError(
                 f"{self.model.__class__.__name__} currently supports a prescribed "
                 "vector potential only; set include_screening=False."
@@ -211,6 +361,12 @@ class TDGLSolver:
             isinstance(applied_vector_potential, Parameter)
             and applied_vector_potential.time_dependent
         )
+        if self.local_screening and self.dynamic_vector_potential:
+            raise ValueError(
+                "Local multicomponent screening requires a time-independent "
+                "applied vector potential during each solve. Use continuation "
+                "between successive static applied fields."
+            )
         if not callable(applied_vector_potential):
             applied_vector_potential = ConstantField(
                 applied_vector_potential,
@@ -228,11 +384,18 @@ class TDGLSolver:
         current_A_applied = self.applied_vector_potential(
             self.edge_centers[:, 0], self.edge_centers[:, 1], self.z0, **A_kwargs
         )
-        current_A_applied = self.A_scale * np.asarray(current_A_applied)[:, :2]
+        current_A_applied = np.asarray(current_A_applied)
+        if current_A_applied.ndim != 2 or current_A_applied.shape[1] < 2:
+            raise ValueError(
+                f"Unexpected shape for vector_potential: {current_A_applied.shape}."
+            )
+        current_A_applied = self.A_scale * current_A_applied[:, :2]
         if current_A_applied.shape != self.edge_centers.shape:
             raise ValueError(
                 f"Unexpected shape for vector_potential: {current_A_applied.shape}."
             )
+        if not np.all(np.isfinite(current_A_applied)):
+            raise ValueError("The applied vector potential must be finite.")
 
         # Create the epsilon parameter, which sets the local critical temperature.
         if callable(disorder_epsilon):
@@ -258,15 +421,20 @@ class TDGLSolver:
             epsilon = disorder_epsilon(self.sites, **kw)
         else:
             epsilon = np.array([float(disorder_epsilon(r, **kw)) for r in self.sites])
-        if np.any(epsilon > 1):
-            raise ValueError("The disorder parameter epsilon must be <= 1")
-        if isinstance(self.model, (DPlusDPrimeModel, SPlusSModel)) and (
+        epsilon = self._normalize_epsilon(epsilon)
+        s_plus_s_disorder_mapped = isinstance(self.model, SPlusSModel) and (
+            self.model.disorder_coupling1 != 0 or self.model.disorder_coupling2 != 0
+        )
+        unsupported_disorder = isinstance(self.model, DPlusDPrimeModel) or (
+            isinstance(self.model, SPlusSModel) and not s_plus_s_disorder_mapped
+        )
+        if unsupported_disorder and (
             self.dynamic_epsilon or not np.allclose(epsilon, 1)
         ):
             raise ValueError(
                 f"{self.model.__class__.__name__} uses fixed-temperature quadratic "
-                "coefficients and does not support disorder_epsilon values other "
-                "than 1."
+                "coefficients without an explicit disorder mapping and does not "
+                "support disorder_epsilon values other than 1."
             )
 
         # Clear the Parameter caches
@@ -293,21 +461,30 @@ class TDGLSolver:
         if terminal_currents is None:
             terminal_currents = {name: 0 for name in terminal_names}
         if callable(terminal_currents):
-            current_func = terminal_currents
+            raw_current_func = terminal_currents
         else:
-            terminal_currents = {
-                name: terminal_currents.get(name, 0) for name in terminal_names
-            }
+            _check_terminal_currents(terminal_currents, self.terminal_info)
+            supplied_currents = dict(terminal_currents)
 
-            def current_func(t):
-                return terminal_currents
+            def raw_current_func(t):
+                return supplied_currents
 
         J_scale = 4 * ((ureg(current_units) / length_units) / K0).to_base_units()
         assert J_scale.dimensionless, str(J_scale)
         J_scale = J_scale.magnitude
-        self.current_func = lambda t: {
-            key: J_scale * value for key, value in current_func(t).items()
-        }
+        if isinstance(self.model, (SPlusDModel, SPlusSModel)):
+            # Multicomponent diffusion clocks store transport currents as
+            # J / beta_em. Solution reconstruction restores this factor.
+            J_scale /= self.model.beta_em
+
+        def scaled_current_func(t):
+            currents = raw_current_func(t)
+            _check_terminal_currents(currents, self.terminal_info)
+            scaled = {key: J_scale * value for key, value in currents.items()}
+            _check_terminal_currents(scaled, self.terminal_info)
+            return scaled
+
+        self.current_func = scaled_current_func
         validate_terminal_currents(self.current_func, self.terminal_info, self.options)
         terminal_indices = [t.site_indices for t in self.terminal_info]
         if terminal_indices:
@@ -339,10 +516,17 @@ class TDGLSolver:
             use_cupy=self.use_cupy,
             fixed_sites=normal_boundary_index,
             fix_psi=(terminal_psi is not None),
+            use_fem_for_psi=isinstance(self.model, SPlusDModel),
         )
-        operators.build_operators()
+        operators.build_operators(build_magnetic_diffusion=self.local_screening)
         operators.set_link_exponents(current_A_applied)
         self.operators = operators
+        self.applied_triangle_field = operators.get_triangle_magnetic_field(
+            current_A_applied
+        )
+        self.applied_boundary_field = self.applied_triangle_field[
+            operators.boundary_triangle_indices
+        ]
         if isinstance(self.model, DPlusDPrimeModel):
             self.magnetic_field = operators.get_magnetic_field(current_A_applied)
         else:
@@ -360,20 +544,17 @@ class TDGLSolver:
             psi2_init = np.full(len(mesh.sites), -1e-4j, dtype=np.complex128)
         elif isinstance(self.model, SPlusDModel):
             psi2_init = np.ones(len(mesh.sites), dtype=np.complex128)
-            psi1_init = np.zeros(len(mesh.sites), dtype=np.complex128) + 1e-4 * (
-                np.random.rand(len(mesh.sites)) + 1j * np.random.rand(len(mesh.sites))
-            )
+            # Goncalves et al. initialize the d component to one and the s
+            # component to zero.  Field and boundary anisotropy provide a
+            # deterministic source for s through the mixed-gradient term.
+            psi1_init = np.zeros(len(mesh.sites), dtype=np.complex128)
             if terminal_psi is not None:
                 psi2_init[normal_boundary_index] = terminal_psi
                 psi1_init[normal_boundary_index] = 0.0
         elif isinstance(self.model, SPlusSModel):
-            amp1 = max(np.sqrt(max(-self.model.a1 / self.model.b1, 0)), 1e-4)
-            amp2 = max(np.sqrt(max(-self.model.a2 / self.model.b2, 0)), 1e-4)
-            relative_sign = -1.0 if self.model.josephson_gamma < 0 else 1.0
-            psi1_init = np.full(len(mesh.sites), amp1, dtype=np.complex128)
-            psi2_init = np.full(
-                len(mesh.sites), relative_sign * amp2, dtype=np.complex128
-            )
+            uniform_psi1, uniform_psi2 = _s_plus_s_uniform_state(self.model)
+            psi1_init = np.full(len(mesh.sites), uniform_psi1, dtype=np.complex128)
+            psi2_init = np.full(len(mesh.sites), uniform_psi2, dtype=np.complex128)
         else:
             psi2_init = np.zeros(len(mesh.sites), dtype=np.complex128)
             psi1_init = np.ones(len(mesh.sites), dtype=np.complex128)
@@ -407,7 +588,7 @@ class TDGLSolver:
 
         self.new_A_induced = None
         self.areas = None
-        if options.include_screening:
+        if options.include_screening and not self.local_screening:
             A_scale = (ureg("mu_0") / (4 * np.pi) * K0 / A0).to(1 / length_units)
             self.new_A_induced = np.empty((self.num_edges, 2), dtype=float)
             self.areas = A_scale.magnitude * mesh.areas * xi**2
@@ -422,6 +603,44 @@ class TDGLSolver:
         self.d_psi_sq_vals = []
         self.tentative_dt = options.dt_init
         self.dt_max = options.dt_max if options.adaptive else options.dt_init
+        if isinstance(self.model, SPlusDModel):
+            h_min = float(np.min(mesh.edge_mesh.edge_lengths))
+            rate_d = 1.0
+            rate_s = 1 / self.model.relaxation_s
+            mixed_rate_sq = self.model.eta_v**2 / (
+                self.model.eta_s * self.model.relaxation_s
+            )
+            condensate_rate = 0.5 * (
+                rate_d + rate_s + np.sqrt((rate_d - rate_s) ** 2 + 4 * mixed_rate_sq)
+            )
+            stable_dt = h_min**2 / (4 * condensate_rate)
+            if not options.adaptive and options.dt_init > stable_dt:
+                raise ValueError(
+                    "The fixed s+d time step exceeds the explicit stability "
+                    f"bound ({options.dt_init:.3g} > {stable_dt:.3g})."
+                )
+            self.dt_max = min(self.dt_max, stable_dt)
+            self.tentative_dt = min(self.tentative_dt, self.dt_max)
+        elif isinstance(self.model, SPlusSModel) and self.model.mixed_gradient_k12:
+            h_min = float(np.min(mesh.edge_mesh.edge_lengths))
+            rate1 = 1 / self.model.relaxation1
+            rate2 = self.model.k2_over_k1 / self.model.relaxation2
+            mixed_rate_sq = self.model.mixed_gradient_k12**2 / (
+                self.model.relaxation1 * self.model.relaxation2
+            )
+            condensate_rate = 0.5 * (
+                rate1 + rate2 + np.sqrt((rate1 - rate2) ** 2 + 4 * mixed_rate_sq)
+            )
+            stable_dt = h_min**2 / (4 * condensate_rate)
+            if not options.adaptive and options.dt_init > stable_dt:
+                raise ValueError(
+                    "The fixed s+s time step exceeds the mixed-gradient explicit "
+                    f"stability bound ({options.dt_init:.3g} > {stable_dt:.3g})."
+                )
+            self.dt_max = min(self.dt_max, stable_dt)
+            self.tentative_dt = min(self.tentative_dt, self.dt_max)
+        self._s_plus_d_magnetic_dt = None
+        self._s_plus_d_magnetic_lu = None
 
         if options.monitor:
             os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
@@ -460,10 +679,40 @@ class TDGLSolver:
         A_applied = self.applied_vector_potential(
             self.edge_centers[:, 0], self.edge_centers[:, 1], self.z0, t=time
         )
+        xp = cupy if self.use_cupy else np
+        A_applied = xp.asarray(A_applied)
+        if A_applied.ndim != 2 or A_applied.shape[1] < 2:
+            raise ValueError(
+                f"Unexpected shape for vector_potential: {A_applied.shape}."
+            )
         A_applied = self.A_scale * A_applied[:, :2]
-        if self.use_cupy:
-            A_applied = cupy.asarray(A_applied)
+        expected_shape = (self.num_edges, 2)
+        if A_applied.shape != expected_shape:
+            raise ValueError(
+                f"Unexpected shape for vector_potential: {A_applied.shape}; "
+                f"expected {expected_shape}."
+            )
+        if not bool(xp.all(xp.isfinite(A_applied))):
+            raise ValueError("The applied vector potential must be finite.")
         return A_applied
+
+    def _normalize_epsilon(self, epsilon: np.ndarray) -> np.ndarray:
+        """Return a finite site array satisfying the model's epsilon bound."""
+        xp = cupy if self.use_cupy else np
+        epsilon = xp.asarray(epsilon, dtype=float)
+        if epsilon.ndim == 0:
+            epsilon = xp.full(len(self.sites), epsilon, dtype=float)
+        expected_shape = (len(self.sites),)
+        if epsilon.shape != expected_shape:
+            raise ValueError(
+                f"The disorder parameter epsilon must have shape {expected_shape}, "
+                f"got {epsilon.shape}."
+            )
+        if not bool(xp.all(xp.isfinite(epsilon))):
+            raise ValueError("The disorder parameter epsilon must be finite.")
+        if bool(xp.any(epsilon > 1)):
+            raise ValueError("The disorder parameter epsilon must be <= 1.")
+        return epsilon
 
     def update_epsilon(self, time: float) -> np.ndarray:
         """Evaluates the time-dependent disorder parameter :math:`\\epsilon`.
@@ -480,9 +729,7 @@ class TDGLSolver:
             epsilon = np.array(
                 [float(self.disorder_epsilon(r, t=time)) for r in self.sites]
             )
-        if self.use_cupy:
-            epsilon = cupy.asarray(epsilon)
-        return epsilon
+        return self._normalize_epsilon(epsilon)
 
     def solve_for_psi_squared(
         self,
@@ -575,7 +822,7 @@ class TDGLSolver:
             for retries in itertools.count():
                 if result is not None:
                     break  # First evaluation of |psi|^2 was successful.
-                if not options.adaptive or retries > options.max_solve_retries:
+                if not options.adaptive or retries >= options.max_solve_retries:
                     raise RuntimeError(
                         f"Solver failed to converge in {options.max_solve_retries}"
                         f" retries at step {step} with dt = {dt:.2e}."
@@ -628,14 +875,16 @@ class TDGLSolver:
                 lap_x_s = self.operators.laplacian_x @ psi1
                 lap_y_s = self.operators.laplacian_y @ psi1
 
-                mixed_d = self.model.eta_v * (lap_x_s - lap_y_s)
-                mixed_s = self.model.eta_v * (lap_x_d - lap_y_d)
+                # Goncalves et al. Eqs. (17)-(18), using
+                # Pi_i = i D_i for this code's D_i = partial_i - i A_i.
+                mixed_d = self.model.eta_v * (lap_y_s - lap_x_s)
+                mixed_s = self.model.eta_v * (lap_y_d - lap_x_d)
             else:
                 mixed_d = 0
                 mixed_s = 0
 
-            # Canonical dimensionless d+s equations. Disorder modifies the
-            # temperature-dependent d-sector coefficient; nu is independent.
+            # Canonical dimensionless d+s equations. Disorder always modifies
+            # the d-sector coefficient and may be coupled into nu_eff.
             rhs2 = (
                 lap2
                 + epsilon_disorder * psi2
@@ -646,25 +895,43 @@ class TDGLSolver:
             )
             rhs1 = (
                 self.model.eta_s * lap1
-                + self.model.nu * psi1
+                + (
+                    self.model.nu
+                    + self.model.nu_disorder_coupling * (epsilon_disorder - 1)
+                )
+                * psi1
                 - self.model.tau1 * abs_sq_psi1 * psi1
                 - 0.5 * self.model.tau3 * abs_sq_psi2 * psi1
                 - self.model.tau4 * (psi2**2) * xp.conj(psi1)
                 + mixed_s
             )
         elif isinstance(self.model, SPlusSModel):
-            # Negative free-energy gradients for the two isotropic bands.
-            # Positive josephson_gamma favors equal phases.
+            # Negative free-energy gradients for Lin--Maiti--Chubukov's two
+            # isotropic s-wave fields. Positive josephson_gamma favors equal
+            # phases; positive phase_gamma2 at zero Josephson coupling favors
+            # the time-reversed relative phases +/- pi/2.
+            a1_effective = self.model.a1 + self.model.disorder_coupling1 * (
+                1 - epsilon_disorder
+            )
+            a2_effective = self.model.a2 + self.model.disorder_coupling2 * (
+                1 - epsilon_disorder
+            )
             rhs2 = (
                 self.model.k2_over_k1 * lap2
-                - self.model.a2 * psi2
+                + self.model.mixed_gradient_k12 * lap1
+                - a2_effective * psi2
                 - self.model.b2 * abs_sq_psi2 * psi2
+                - 0.5 * self.model.density_gamma3 * abs_sq_psi1 * psi2
+                - self.model.phase_gamma2 * xp.conj(psi2) * psi1**2
                 + self.model.josephson_gamma * psi1
             )
             rhs1 = (
                 lap1
-                - self.model.a1 * psi1
+                + self.model.mixed_gradient_k12 * lap2
+                - a1_effective * psi1
                 - self.model.b1 * abs_sq_psi1 * psi1
+                - 0.5 * self.model.density_gamma3 * abs_sq_psi2 * psi1
+                - self.model.phase_gamma2 * xp.conj(psi1) * psi2**2
                 + self.model.josephson_gamma * psi2
             )
         else:
@@ -679,7 +946,9 @@ class TDGLSolver:
             # Euler step
             if isinstance(self.model, SPlusDModel):
                 new_psi2 = U * (psi2 + dt * rhs2)
-                new_psi1 = U * (psi1 + (dt / self.model.eta_s) * rhs1)
+                new_psi1 = U * (
+                    psi1 + (dt / (self.model.eta_s * self.model.relaxation_s)) * rhs1
+                )
             elif isinstance(self.model, DPlusDPrimeModel):
                 new_psi2 = U * (psi2 + (dt / self.model.relaxation_d_prime) * rhs2)
                 new_psi1 = U * (psi1 + (dt / self.model.relaxation_d) * rhs1)
@@ -701,7 +970,7 @@ class TDGLSolver:
                 if change_d <= 0.1 and change_s <= 0.1:
                     break
 
-            if not options.adaptive or retries > options.max_solve_retries:
+            if not options.adaptive or retries >= options.max_solve_retries:
                 raise RuntimeError(
                     f"Solver failed to converge in {options.max_solve_retries}"
                     f" retries at step {step} with dt = {dt:.2e}."
@@ -722,32 +991,163 @@ class TDGLSolver:
 
         return new_psi2, new_psi1, new_sq_d, new_sq_s, dt
 
-    def compute_s_plus_s_free_energy(self, psi1: np.ndarray, psi2: np.ndarray) -> float:
-        """Return the discrete condensate free energy for ``SPlusSModel``.
+    def compute_s_plus_s_free_energy(
+        self,
+        psi1: np.ndarray,
+        psi2: np.ndarray,
+        vector_potential: Optional[np.ndarray] = None,
+        include_magnetic: bool = False,
+        average: bool = False,
+    ) -> float:
+        """Return the discrete Gibbs free energy for ``SPlusSModel``.
 
-        The magnetic-field energy is not included. For a fixed vector
-        potential and zero scalar potential, sufficiently small dissipative
-        steps should not increase this quantity.
+        The condensate terms are the exact Hermitian edge discretization whose
+        variations produce the two TDGL residuals and the mixed-gradient
+        current. ``vector_potential`` defaults to the links currently installed
+        in the operators. Magnetic energy remains opt-in for compatibility with
+        the original condensate-only diagnostic.
         """
         if not isinstance(self.model, SPlusSModel):
             raise TypeError("compute_s_plus_s_free_energy requires SPlusSModel.")
         xp = np if isinstance(psi1, np.ndarray) else cupy
         model = self.model
-        areas = self.operators.areas
-        abs_sq_psi1 = xp.absolute(psi1) ** 2
-        abs_sq_psi2 = xp.absolute(psi2) ** 2
-        potential = (
-            model.a1 * abs_sq_psi1
-            + 0.5 * model.b1 * abs_sq_psi1**2
-            + model.a2 * abs_sq_psi2
-            + 0.5 * model.b2 * abs_sq_psi2**2
-            - 2 * model.josephson_gamma * xp.real(psi1 * xp.conj(psi2))
-        )
-        lap1 = self.operators.psi_laplacian @ psi1
-        lap2 = self.operators.psi_laplacian @ psi2
-        gradient = -xp.real(xp.conj(psi1) * lap1)
-        gradient -= model.k2_over_k1 * xp.real(xp.conj(psi2) * lap2)
-        return float(xp.sum(areas * (potential + gradient)))
+        operators = self.operators
+        areas = operators.areas
+        old_vector_potential = operators.link_exponents
+        restore_links = vector_potential is not None
+        if restore_links:
+            operators.set_link_exponents(vector_potential)
+        try:
+            abs_sq_psi1 = xp.absolute(psi1) ** 2
+            abs_sq_psi2 = xp.absolute(psi2) ** 2
+            epsilon = xp.asarray(getattr(self, "epsilon", xp.ones_like(abs_sq_psi1)))
+            a1_effective = model.a1 + model.disorder_coupling1 * (1 - epsilon)
+            a2_effective = model.a2 + model.disorder_coupling2 * (1 - epsilon)
+            interband_product = xp.conj(psi1) * psi2
+            potential = (
+                a1_effective * abs_sq_psi1
+                + 0.5 * model.b1 * abs_sq_psi1**2
+                + a2_effective * abs_sq_psi2
+                + 0.5 * model.b2 * abs_sq_psi2**2
+                + 0.5 * model.density_gamma3 * abs_sq_psi1 * abs_sq_psi2
+                + model.phase_gamma2 * xp.real(interband_product**2)
+                - 2 * model.josephson_gamma * xp.real(interband_product)
+            )
+            grad1 = operators.psi_gradient @ psi1
+            grad2 = operators.psi_gradient @ psi2
+            gradient = operators.psi_laplacian_weights * (
+                xp.absolute(grad1) ** 2
+                + model.k2_over_k1 * xp.absolute(grad2) ** 2
+                + 2 * model.mixed_gradient_k12 * xp.real(xp.conj(grad1) * grad2)
+            )
+            energy = xp.sum(areas * potential)
+            energy += xp.sum(operators.edge_lengths**2 * gradient)
+        finally:
+            if restore_links and old_vector_potential is not None:
+                operators.set_link_exponents(old_vector_potential)
+
+        if include_magnetic:
+            if vector_potential is None:
+                vector_potential = operators.link_exponents
+            if vector_potential is None:
+                raise ValueError("vector_potential is required for magnetic energy.")
+            induction = operators.get_triangle_magnetic_field(vector_potential)
+            applied = xp.asarray(self.applied_triangle_field)
+            coords = self.device.mesh.sites[self.device.mesh.elements]
+            edge_1 = coords[:, 1] - coords[:, 0]
+            edge_2 = coords[:, 2] - coords[:, 0]
+            triangle_areas = 0.5 * xp.absolute(
+                edge_1[:, 0] * edge_2[:, 1] - edge_1[:, 1] * edge_2[:, 0]
+            )
+            energy += xp.sum(
+                triangle_areas * self.device.kappa**2 * (induction - applied) ** 2
+            )
+        if average:
+            energy /= xp.sum(areas)
+        return float(energy)
+
+    def compute_s_plus_d_free_energy(
+        self,
+        d: np.ndarray,
+        s: np.ndarray,
+        vector_potential: Optional[np.ndarray] = None,
+        include_magnetic: bool = True,
+        average: bool = True,
+    ) -> float:
+        r"""Return the discrete Gibbs free energy of Goncalves et al. Eq. (78).
+
+        The condensate terms use the same gauge links and directional finite-
+        element forms as the TDGL equations.  If ``include_magnetic`` is true,
+        the last term is :math:`\kappa^2(B-H)^2`, evaluated per triangle.
+        ``vector_potential`` defaults to the links currently installed in the
+        solver operators.  By default the integral is divided by sample area,
+        matching the paper's definition; set ``average=False`` for the total.
+        """
+        if not isinstance(self.model, SPlusDModel):
+            raise TypeError("compute_s_plus_d_free_energy requires SPlusDModel.")
+        xp = np if isinstance(d, np.ndarray) else cupy
+        model = self.model
+        operators = self.operators
+        areas = operators.areas
+        old_vector_potential = operators.link_exponents
+        restore_links = vector_potential is not None
+        if restore_links:
+            operators.set_link_exponents(vector_potential)
+        try:
+            abs_sq_d = xp.absolute(d) ** 2
+            abs_sq_s = xp.absolute(s) ** 2
+            potential = (
+                -xp.asarray(self.epsilon) * abs_sq_d
+                - (
+                    model.nu
+                    + model.nu_disorder_coupling * (xp.asarray(self.epsilon) - 1)
+                )
+                * abs_sq_s
+                + 0.5 * abs_sq_d**2
+                + 0.5 * model.tau1 * abs_sq_s**2
+                + 0.5 * model.tau3 * abs_sq_d * abs_sq_s
+                + model.tau4 * xp.real((xp.conj(s) ** 2) * d**2)
+            )
+            # Evaluate the Hermitian edge energy directly. The evolution
+            # matrices replace fixed rows for Dirichlet boundary conditions,
+            # so using those matrices here would not be the variational energy.
+            grad_d = operators.psi_gradient @ d
+            grad_s = operators.psi_gradient @ s
+            edge_length_sq = operators.edge_lengths**2
+            gradient = operators.psi_laplacian_weights * (
+                xp.absolute(grad_d) ** 2 + model.eta_s * xp.absolute(grad_s) ** 2
+            )
+            gradient += (
+                2
+                * model.eta_v
+                * (operators.laplacian_weights_y - operators.laplacian_weights_x)
+                * xp.real(xp.conj(grad_s) * grad_d)
+            )
+            energy = xp.sum(areas * potential)
+            energy += xp.sum(edge_length_sq * gradient)
+        finally:
+            if restore_links and old_vector_potential is not None:
+                operators.set_link_exponents(old_vector_potential)
+
+        if include_magnetic:
+            if vector_potential is None:
+                vector_potential = operators.link_exponents
+            if vector_potential is None:
+                raise ValueError("vector_potential is required for magnetic energy.")
+            induction = operators.get_triangle_magnetic_field(vector_potential)
+            applied = xp.asarray(self.applied_triangle_field)
+            coords = self.device.mesh.sites[self.device.mesh.elements]
+            edge_1 = coords[:, 1] - coords[:, 0]
+            edge_2 = coords[:, 2] - coords[:, 0]
+            triangle_areas = 0.5 * xp.absolute(
+                edge_1[:, 0] * edge_2[:, 1] - edge_1[:, 1] * edge_2[:, 0]
+            )
+            energy += xp.sum(
+                triangle_areas * self.device.kappa**2 * (induction - applied) ** 2
+            )
+        if average:
+            energy /= xp.sum(areas)
+        return float(energy)
 
     def compute_d_plus_d_prime_free_energy(
         self,
@@ -806,6 +1206,7 @@ class TDGLSolver:
             :math:`\\mu`, :math:`\\mathbf{J}_s`, and :math:`\\mathbf{J}_n`
         """
         use_cupy = self.use_cupy
+        xp = cupy if use_cupy else np
         options = self.options
         use_cupy_solver = options.sparse_solver is SparseSolver.CUPY
         operators = self.operators
@@ -813,23 +1214,23 @@ class TDGLSolver:
         if isinstance(self.model, SingleBandModel):
             supercurrent = operators.get_supercurrent(psi1)
         elif isinstance(self.model, DPlusDPrimeModel):
-            supercurrent = (
-                operators.get_s_plus_s_supercurrent(
-                    psi1,
-                    psi2,
-                    k2_over_k1=1.0,
-                )
-                / self.model.em_coupling
+            supercurrent = operators.get_s_plus_s_supercurrent(
+                psi1,
+                psi2,
+                k2_over_k1=1.0,
             )
+            if self.model.zeeman_coupling:
+                chirality = xp.conj(psi1) * psi2 - psi1 * xp.conj(psi2)
+                magnetization = xp.real(1j * self.model.zeeman_coupling * chirality)
+                supercurrent += operators.get_magnetization_current(magnetization)
+            supercurrent /= self.model.em_coupling
         elif isinstance(self.model, SPlusSModel):
-            supercurrent = (
-                operators.get_s_plus_s_supercurrent(
-                    psi1,
-                    psi2,
-                    k2_over_k1=self.model.k2_over_k1,
-                )
-                / self.model.em_coupling
-            )
+            supercurrent = operators.get_s_plus_s_supercurrent(
+                psi1,
+                psi2,
+                k2_over_k1=self.model.k2_over_k1,
+                mixed_gradient_k12=self.model.mixed_gradient_k12,
+            ) / (self.model.em_coupling * self.model.beta_em)
         else:
             # Store and use the Poisson-normalized transport supercurrent.
             # The unscaled condensate current is J_s in the reference equations.
@@ -919,6 +1320,108 @@ class TDGLSolver:
             del A_induced_vals[:-2]
         return A_induced, screening_error
 
+    def advance_s_plus_d_vector_potential(
+        self,
+        psi_d: np.ndarray,
+        psi_s: np.ndarray,
+        applied_vector_potential: np.ndarray,
+        induced_vector_potential: np.ndarray,
+        dt: float,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        r"""Advance Goncalves et al. Eq. (19) by one implicit magnetic step.
+
+        The edge scalar is the tangential component of ``A``.  The discrete
+        magnetic term is applied to the induced field
+        :math:`B-H=\nabla\times A_{\rm induced}`. This formulation is valid for
+        nonuniform prescribed applied fields as well as uniform fields. The
+        optional homogeneous drive subtracts a transport-current source from
+        the condensate current, so the normal state obeys
+        :math:`-\partial_t A=J_{\rm drive}/\beta_{\rm em}`.
+        The
+        linear magnetic diffusion
+        term is implicit because the smallest dual edges of an unstructured
+        mesh make the paper's explicit Cartesian-grid update prohibitively
+        stiff; the condensate current remains evaluated at the accepted TDGL
+        state.
+        """
+        if not isinstance(self.model, SPlusDModel):
+            raise TypeError("advance_s_plus_d_vector_potential requires SPlusDModel.")
+        return self._advance_local_vector_potential(
+            psi_d,
+            psi_s,
+            induced_vector_potential,
+            dt,
+        )
+
+    def advance_s_plus_s_vector_potential(
+        self,
+        psi2: np.ndarray,
+        psi1: np.ndarray,
+        applied_vector_potential: np.ndarray,
+        induced_vector_potential: np.ndarray,
+        dt: float,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        r"""Advance the local electromagnetic equation for ``SPlusSModel``.
+
+        The prescribed applied field enters through the boundary curl term of
+        the magnetic-diffusion operator, so only the induced field ``B-H`` is
+        advanced here. ``applied_vector_potential`` is retained in the public
+        signature for symmetry with :meth:`advance_s_plus_d_vector_potential`.
+        """
+        if not isinstance(self.model, SPlusSModel):
+            raise TypeError("advance_s_plus_s_vector_potential requires SPlusSModel.")
+        return self._advance_local_vector_potential(
+            psi2,
+            psi1,
+            induced_vector_potential,
+            dt,
+        )
+
+    def _advance_local_vector_potential(
+        self,
+        psi2: np.ndarray,
+        psi1: np.ndarray,
+        induced_vector_potential: np.ndarray,
+        dt: float,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Advance a multicomponent local Maxwell equation by one implicit step."""
+        operators = self.operators
+        if isinstance(self.model, SPlusDModel):
+            raw_supercurrent = operators.get_s_plus_d_supercurrent(
+                psi2,
+                psi1,
+                eta_s=self.model.eta_s,
+                eta_v=self.model.eta_v,
+            )
+            drive = getattr(self, "s_plus_d_drive_tangent", 0.0)
+        elif isinstance(self.model, SPlusSModel):
+            raw_supercurrent = operators.get_s_plus_s_supercurrent(
+                psi1,
+                psi2,
+                k2_over_k1=self.model.k2_over_k1,
+                mixed_gradient_k12=self.model.mixed_gradient_k12,
+            )
+            drive = 0.0
+        else:
+            raise TypeError(
+                "Local vector-potential evolution requires SPlusDModel or "
+                "SPlusSModel."
+            )
+        tangent = self.normalized_directions
+        induced_tangent = np.einsum("ij,ij->i", induced_vector_potential, tangent)
+        rate = dt * self.device.kappa**2 / self.model.beta_em
+        if self._s_plus_d_magnetic_dt != dt:
+            implicit_operator = sp.eye(self.num_edges, format="csc") + rate * (
+                operators.magnetic_diffusion
+            )
+            self._s_plus_d_magnetic_lu = sp.linalg.factorized(implicit_operator)
+            self._s_plus_d_magnetic_dt = dt
+        rhs = induced_tangent + (dt / self.model.beta_em) * (raw_supercurrent - drive)
+        new_induced_tangent = self._s_plus_d_magnetic_lu(rhs)
+        dA_dt = (new_induced_tangent - induced_tangent) / dt
+        new_induced = new_induced_tangent[:, None] * tangent
+        return new_induced, dA_dt
+
     def update(
         self,
         state: Dict[str, numbers.Real],
@@ -957,90 +1460,163 @@ class TDGLSolver:
         xp = self.xp
         options = self.options
         operators = self.operators
+        local_screening = getattr(
+            self, "local_screening", getattr(self, "goncalves_screening", False)
+        )
 
         step = state["step"]
         time = state["time"]
         A_induced = induced_vector_potential
-        prev_A_applied = A_applied = applied_vector_potential
-
-        # Update the scalar potential boundary conditions.
-        self.update_mu_boundary(time)
-
-        # Update the applied vector potential.
-        dA_dt = 0.0
-        current_A_applied = self.current_A_applied
-        if self.dynamic_vector_potential:
-            current_A_applied = self.update_applied_vector_potential(time)
-            dA_vector_dt = (current_A_applied - prev_A_applied) / dt
-            dA_dt = xp.einsum(
-                "ij, ij -> i",
-                dA_vector_dt,
-                self.normalized_directions,
-            )
-            self.dA_boundary_normal = xp.einsum(
-                "ij, ij -> i",
-                dA_vector_dt[self.boundary_edge_indices],
-                self.boundary_normals,
-            )
-            if not xp.allclose(current_A_applied, self.current_A_applied):
-                # Update the link exponents only if the applied vector potential
-                # has actually changed.
-                operators.set_link_exponents(current_A_applied)
-        else:
-            assert A_applied is None
-            prev_A_applied = A_applied = current_A_applied
-        self.current_A_applied = current_A_applied
+        # Dynamic inputs are evaluated at both ends of the accepted interval.
+        # Re-evaluating the left endpoint also makes a post-thermalization time
+        # reset deterministic instead of differentiating against stale saved data.
+        current_A_applied = (
+            self.update_applied_vector_potential(time)
+            if self.dynamic_vector_potential
+            else self.current_A_applied
+        )
+        current_epsilon = (
+            self.update_epsilon(time) if self.dynamic_epsilon else self.epsilon
+        )
         if isinstance(self.model, DPlusDPrimeModel):
-            self.magnetic_field = operators.get_magnetic_field(current_A_applied)
+            self.magnetic_field = operators.get_magnetic_field(
+                current_A_applied + A_induced
+            )
+        psi2_n = psi2
+        psi1_n = psi1
+        mu_n = mu
+        if local_screening:
+            # Local Maxwell evolution is formulated in temporal gauge. A seed
+            # produced by a Poisson/prescribed-field solve can carry a nonzero
+            # scalar potential, which must not enter even the first local step.
+            mu_n = xp.zeros_like(mu_n)
+        old_sq_psi2 = xp.absolute(psi2_n) ** 2
+        old_sq_psi1 = xp.absolute(psi1_n) ** 2
+        dt = min(self.tentative_dt, state.get("_remaining_time", dt))
 
-        # Update the value of epsilon
-        if self.dynamic_epsilon:
-            self.epsilon = self.update_epsilon(time)
-
-        epsilon = self.epsilon
-        old_sq_psi2 = xp.absolute(psi2) ** 2
-        old_sq_psi1 = xp.absolute(psi1) ** 2
-        screening_error = np.inf
-        A_induced_vals = [A_induced]
-        velocity = [0.0]  # Velocity for Polyak's method
-        # This loop runs only once if options.include_screening is False
-        for screening_iteration in itertools.count():
-            if screening_error < options.screening_tolerance:
-                break
-            if screening_iteration > options.max_iterations_per_step:
-                raise RuntimeError(
-                    f"Screening calculation failed to converge at step {step} after"
-                    f" {options.max_iterations_per_step} iterations. Relative error in"
-                    f" induced vector potential: {screening_error:.2e}"
-                    f" (tolerance: {options.screening_tolerance:.2e})."
+        def endpoint_inputs(accepted_dt):
+            endpoint_time = time + accepted_dt
+            next_A = (
+                self.update_applied_vector_potential(endpoint_time)
+                if self.dynamic_vector_potential
+                else current_A_applied
+            )
+            if self.dynamic_vector_potential:
+                dA_vector_dt = (next_A - current_A_applied) / accepted_dt
+                applied_dA_dt = xp.einsum(
+                    "ij,ij->i", dA_vector_dt, self.normalized_directions
                 )
-
-            # Adjust the time step and calculate the new the order parameter
-            if screening_iteration == 0:
-                # Find a new time step only for the first screening iteration.
-                dt = min(self.tentative_dt, state.get("_remaining_time", dt))
-
-            if options.include_screening:
-                # Update the link variables in the covariant Laplacian and gradient
-                # for psi based on the induced vector potential from the previous iteration.
-                operators.set_link_exponents(current_A_applied + A_induced)
-
-            # Update the order parameter using an adaptive time step
-            psi2, psi1, abs_sq_psi2, abs_sq_psi1, dt = self.adaptive_euler_step(
-                step, psi2, psi1, old_sq_psi2, old_sq_psi1, mu, epsilon, dt
-            )
-            # Update the scalar potential, supercurrent density, and normal current density
-            mu, supercurrent, normal_current = self.solve_for_observables(
-                psi2, psi1, dA_dt
-            )
-
-            if options.include_screening:
-                # Evaluate the induced vector potential
-                A_induced, screening_error = self.get_induced_vector_potential(
-                    supercurrent + normal_current, A_induced_vals, velocity
+                self.dA_boundary_normal = xp.einsum(
+                    "ij,ij->i",
+                    dA_vector_dt[self.boundary_edge_indices],
+                    self.boundary_normals,
                 )
             else:
-                break
+                applied_dA_dt = 0.0
+                self.dA_boundary_normal[...] = 0.0
+            next_epsilon = (
+                self.update_epsilon(endpoint_time)
+                if self.dynamic_epsilon
+                else current_epsilon
+            )
+            self.update_mu_boundary(endpoint_time)
+            return next_A, next_epsilon, applied_dA_dt
+
+        if local_screening:
+            operators.set_link_exponents(current_A_applied + A_induced)
+            psi2, psi1, abs_sq_psi2, abs_sq_psi1, dt = self.adaptive_euler_step(
+                step,
+                psi2_n,
+                psi1_n,
+                old_sq_psi2,
+                old_sq_psi1,
+                mu_n,
+                current_epsilon,
+                dt,
+            )
+            next_A_applied, next_epsilon, _ = endpoint_inputs(dt)
+            A_induced, dA_dt = self._advance_local_vector_potential(
+                psi2, psi1, A_induced, dt
+            )
+            operators.set_link_exponents(next_A_applied + A_induced)
+            # The local bulk algorithms fix phi=0. The Ohmic normal current is
+            # therefore -dA/dt; a Poisson solve would mix gauges and double-count
+            # the electromagnetic response.
+            mu = xp.zeros_like(mu)
+            if isinstance(self.model, SPlusDModel):
+                raw_supercurrent = operators.get_s_plus_d_supercurrent(
+                    psi2,
+                    psi1,
+                    eta_s=self.model.eta_s,
+                    eta_v=self.model.eta_v,
+                )
+            else:
+                raw_supercurrent = operators.get_s_plus_s_supercurrent(
+                    psi1,
+                    psi2,
+                    k2_over_k1=self.model.k2_over_k1,
+                    mixed_gradient_k12=self.model.mixed_gradient_k12,
+                )
+            supercurrent = raw_supercurrent / self.model.beta_em
+            normal_current = -dA_dt
+            screening_iteration = 1
+        else:
+            screening_error = np.inf
+            A_induced_vals = [A_induced]
+            velocity = [0.0]  # Velocity for Polyak's method
+            # This loop runs only once if options.include_screening is False.
+            for screening_iteration in itertools.count():
+                if screening_error < options.screening_tolerance:
+                    break
+                if screening_iteration >= options.max_iterations_per_step:
+                    raise RuntimeError(
+                        f"Screening calculation failed to converge at step {step} after"
+                        f" {options.max_iterations_per_step} iterations. Relative error in"
+                        f" induced vector potential: {screening_error:.2e}"
+                        f" (tolerance: {options.screening_tolerance:.2e})."
+                    )
+
+                if options.include_screening:
+                    operators.set_link_exponents(current_A_applied + A_induced)
+                else:
+                    operators.set_link_exponents(current_A_applied)
+
+                psi2, psi1, abs_sq_psi2, abs_sq_psi1, dt = self.adaptive_euler_step(
+                    step,
+                    psi2_n,
+                    psi1_n,
+                    old_sq_psi2,
+                    old_sq_psi1,
+                    mu_n,
+                    current_epsilon,
+                    dt,
+                )
+                next_A_applied, next_epsilon, dA_dt = endpoint_inputs(dt)
+                operators.set_link_exponents(next_A_applied + A_induced)
+                mu, supercurrent, normal_current = self.solve_for_observables(
+                    psi2, psi1, dA_dt
+                )
+
+                if options.include_screening:
+                    A_induced, screening_error = self.get_induced_vector_potential(
+                        supercurrent + normal_current, A_induced_vals, velocity
+                    )
+                else:
+                    break
+
+        self.current_A_applied = next_A_applied
+        self.epsilon = next_epsilon
+        operators.set_link_exponents(next_A_applied + A_induced)
+        self.applied_triangle_field = operators.get_triangle_magnetic_field(
+            next_A_applied
+        )
+        self.applied_boundary_field = self.applied_triangle_field[
+            operators.boundary_triangle_indices
+        ]
+        if isinstance(self.model, DPlusDPrimeModel):
+            self.magnetic_field = operators.get_magnetic_field(
+                next_A_applied + A_induced
+            )
 
         running_state.append("dt", dt)
         if self.probe_points is not None:
@@ -1074,9 +1650,9 @@ class TDGLSolver:
 
         results = [dt, psi2, psi1, mu, supercurrent, normal_current, A_induced]
         if self.dynamic_vector_potential:
-            results.append(current_A_applied)
+            results.append(next_A_applied)
         if self.dynamic_epsilon:
-            results.append(epsilon)
+            results.append(next_epsilon)
         return SolverResult(*results)
 
     def solve(self) -> Optional[Solution]:
@@ -1110,13 +1686,20 @@ class TDGLSolver:
                     "The seed_solution.device must be equal to the device being simulated."
                 )
             seed_data = seed_solution.tdgl_data
+            seed_induced = seed_data.induced_vector_potential
+            if self.local_screening:
+                # Continue the total vector potential across a field step.  The
+                # new boundary condition then relaxes it toward the new H.
+                seed_induced = seed_induced + (
+                    seed_data.applied_vector_potential - self.current_A_applied
+                )
             parameters = {
                 "psi2": getattr(seed_data, "psi2", seed_data.psi),
                 "psi1": getattr(seed_data, "psi1", np.zeros_like(seed_data.psi)),
                 "mu": seed_data.mu,
                 "supercurrent": seed_data.supercurrent,
                 "normal_current": seed_data.normal_current,
-                "induced_vector_potential": seed_data.induced_vector_potential,
+                "induced_vector_potential": seed_induced,
             }
 
         fixed_values = []

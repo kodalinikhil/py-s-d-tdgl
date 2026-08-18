@@ -122,8 +122,8 @@ class Mesh:
         Returns:
             A new :class:`tdgl.finite_volume.Mesh` instance
         """
-        sites = np.asarray(sites).squeeze()
-        elements = np.asarray(elements).squeeze()
+        sites = np.asarray(sites)
+        elements = np.asarray(elements)
         if sites.ndim != 2 or sites.shape[1] != 2:
             raise ValueError(
                 f"The site coordinates must have shape (n, 2), got {sites.shape!r}"
@@ -225,22 +225,25 @@ class Mesh:
             edges = xp.asarray(edges)
         else:
             xp = np
-        if vector:
-            flux_x = quantity_on_edge * normalized_directions[:, 0]
-            flux_y = quantity_on_edge * normalized_directions[:, 1]
-        else:
-            flux_x = flux_y = quantity_on_edge
-        # Sum x and y components for every edge connecting to the vertex
+        # Sum values for every edge connecting to the vertex. Scalar data is a
+        # direct arithmetic average; it must not inherit the legacy vector
+        # reconstruction factor below.
         vertices = xp.concatenate([edges[:, 0], edges[:, 1]])
+        counts = xp.bincount(vertices)
+        if not vector:
+            values = xp.concatenate([quantity_on_edge, quantity_on_edge])
+            return xp.bincount(vertices, weights=values) / counts
+
+        flux_x = quantity_on_edge * normalized_directions[:, 0]
+        flux_y = quantity_on_edge * normalized_directions[:, 1]
         x_values = xp.concatenate([flux_x, flux_x])
         y_values = xp.concatenate([flux_y, flux_y])
-        counts = xp.bincount(vertices)
         x_group_values = xp.bincount(vertices, weights=x_values) / counts
         y_group_values = xp.bincount(vertices, weights=y_values) / counts
+        # Preserve pyTDGL's established current normalization. Vector
+        # reconstruction and physical current scaling must be revised together.
         vector_val = xp.array([x_group_values, y_group_values]).T / 2
-        if vector:
-            return vector_val
-        return vector_val[:, 0]
+        return vector_val
 
     def smooth(self, iterations: int, create_submesh: bool = True) -> "Mesh":
         """Perform Laplacian smoothing of the mesh, i.e., moving each interior vertex

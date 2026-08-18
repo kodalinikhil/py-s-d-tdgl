@@ -54,6 +54,12 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 
+# Local simulations, plots, and scratch work
+results/
+tmp/
+*.h5
+*.npz
+
 # Translations
 *.mo
 *.pot

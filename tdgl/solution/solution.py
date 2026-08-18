@@ -27,7 +27,13 @@ from ..fluxoid import Fluxoid
 from ..geometry import path_vectors
 from ..parameter import Parameter
 from ..solver.runner import SolverOptions
-from .data import DynamicsData, TDGLData, get_data_range, get_edge_quantity_data
+from .data import (
+    DynamicsData,
+    TDGLData,
+    get_current_scale,
+    get_data_range,
+    get_edge_quantity_data,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +61,46 @@ class BoundaryPhases(NamedTuple):
 
     indices: np.ndarray
     phases: np.ndarray
+
+
+def _triangle_curl_from_edge_vector_potential(
+    mesh, vector_potential: np.ndarray
+) -> np.ndarray:
+    """Return the triangle-centered curl of an edge-centered vector potential."""
+    edge_mesh = mesh.edge_mesh
+    vector_potential = np.asarray(vector_potential)
+    expected_shape = (len(edge_mesh.edges), 2)
+    if vector_potential.shape != expected_shape:
+        raise ValueError(
+            f"vector_potential must have shape {expected_shape}, "
+            f"got {vector_potential.shape}."
+        )
+
+    edge_lookup = {tuple(edge): index for index, edge in enumerate(edge_mesh.edges)}
+    induction = np.empty(len(mesh.elements), dtype=float)
+    for triangle_index, element in enumerate(mesh.elements):
+        coords = mesh.sites[element]
+        edge_1 = coords[1] - coords[0]
+        edge_2 = coords[2] - coords[0]
+        twice_area = edge_1[0] * edge_2[1] - edge_1[1] * edge_2[0]
+        if np.isclose(twice_area, 0):
+            raise ValueError(
+                "Cannot calculate magnetic induction on a degenerate triangle."
+            )
+        oriented = element if twice_area > 0 else element[[0, 2, 1]]
+        circulation = 0.0
+        for start, end in (
+            (oriented[0], oriented[1]),
+            (oriented[1], oriented[2]),
+            (oriented[2], oriented[0]),
+        ):
+            edge_index = edge_lookup[tuple(sorted((start, end)))]
+            stored_start, stored_end = edge_mesh.edges[edge_index]
+            sign = 1 if (stored_start == start and stored_end == end) else -1
+            directed_edge = sign * edge_mesh.directions[edge_index]
+            circulation += np.dot(vector_potential[edge_index], directed_edge)
+        induction[triangle_index] = circulation / (abs(twice_area) / 2)
+    return induction
 
 
 class Solution:
@@ -190,7 +236,9 @@ class Solution:
         normal_current, nc_direc, _ = get_edge_quantity_data(
             self.tdgl_data.normal_current, mesh
         )
-        K0 = self.device.K0.to(f"{self.current_units} / {self.device.length_units}")
+        K0 = get_current_scale(self.device).to(
+            f"{self.current_units} / {self.device.length_units}"
+        )
         # Current density, evaluated on the mesh edges.
         self.supercurrent_density = K0 * supercurrent[:, np.newaxis] * sc_direc
         self.normal_current_density = K0 * normal_current[:, np.newaxis] * nc_direc
@@ -212,7 +260,7 @@ class Solution:
         djx_dy = grad_jx * normalized_directions[:, 1]
         vorticity_on_edges = djy_dx - djx_dy
         vorticity = mesh.get_quantity_on_site(vorticity_on_edges, vector=False)
-        scale = (device.K0 / device.coherence_length).to(
+        scale = (get_current_scale(device) / device.coherence_length).to(
             f"{self.current_units} / {self.device.length_units}**2"
         )
         self._vorticity = vorticity * scale
@@ -485,6 +533,67 @@ class Solution:
         d_prime = self.tdgl_data.psi2
         chirality = np.conj(d) * d_prime - d * np.conj(d_prime)
         return np.real(1j * model.zeeman_coupling * chirality)
+
+    @property
+    def relative_phase(self) -> Union[np.ndarray, None]:
+        r"""Gauge-invariant relative phase of an ``SPlusSModel``.
+
+        Returns :math:`\arg(\psi_2\psi_1^*)` at each mesh site, wrapped to
+        :math:`[-\pi, \pi]`. Returns ``None`` for other model types.
+        """
+        if not isinstance(self.device.layer.model, SPlusSModel):
+            return None
+        return np.angle(self.tdgl_data.psi2 * np.conj(self.tdgl_data.psi1))
+
+    def local_magnetic_induction(
+        self,
+        units: Union[str, None] = None,
+        with_units: bool = True,
+    ) -> Union[np.ndarray, pint.Quantity]:
+        """Return the local total magnetic induction at triangle centers.
+
+        This diagnostic takes the discrete curl of the stored total edge vector
+        potential (applied plus induced). It therefore reports the local field
+        used by screened TDGL evolution, rather than reconstructing a field from
+        the saved currents with :meth:`field_at_position`.
+
+        Args:
+            units: Output magnetic-field units. Defaults to ``self.field_units``.
+                Use ``"Bc2"`` to return the reduced induction :math:`B/B_{c2}`.
+            with_units: Whether to return a :class:`pint.Quantity`. Reduced output
+                has dimensionless units when this is ``True``.
+
+        Returns:
+            One value per entry in ``self.device.mesh.elements``.
+        """
+        applied = self.tdgl_data.applied_vector_potential
+        if applied is None:
+            raise ValueError("No stored applied vector potential is available.")
+        applied = np.asarray(applied)
+        induced = self.tdgl_data.induced_vector_potential
+        if induced is None:
+            induced = np.zeros_like(applied)
+        induced = np.asarray(induced)
+        if induced.shape != applied.shape:
+            raise ValueError(
+                "Stored induced and applied vector potentials must have the same "
+                f"shape, got {induced.shape} and {applied.shape}."
+            )
+        total_vector_potential = applied + induced
+        reduced_induction = _triangle_curl_from_edge_vector_potential(
+            self.device.mesh, total_vector_potential
+        )
+
+        if units == "Bc2":
+            if with_units:
+                return reduced_induction * self.device.ureg.dimensionless
+            return reduced_induction
+
+        units = units or self.field_units
+        induction = (reduced_induction * self.device.Bc2).to(units)
+        if not with_units:
+            return induction.magnitude
+        return induction
 
     def interp_order_parameter(
         self,

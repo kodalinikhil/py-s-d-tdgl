@@ -699,7 +699,7 @@ def plot_current_through_paths(
 
     if labels:
         ax.set_ylabel(f"{label} [${current_units:~L}$]")
-        ax.set_xlabel("Time, $t$ [$\\tau_0$]")
+        ax.set_xlabel("Dimensionless time, $t$")
     if legend:
         ax.legend(loc=0)
 

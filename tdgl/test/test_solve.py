@@ -10,6 +10,65 @@ except ImportError:
 import tdgl
 from tdgl.geometry import box, circle
 from tdgl.solver.options import SolverOptionsError
+from tdgl.solver.solver import validate_terminal_currents
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("equilibrium_tolerance", 0),
+        ("equilibrium_tolerance", -1),
+        ("equilibrium_window", 0),
+        ("equilibrium_window", 1.5),
+        ("equilibrium_min_time", -1),
+    ],
+)
+def test_invalid_equilibrium_options(name, value):
+    options = tdgl.SolverOptions(solve_time=1)
+    setattr(options, name, value)
+    with pytest.raises(SolverOptionsError):
+        options.validate()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("solve_time", 0),
+        ("solve_time", np.nan),
+        ("dt_init", 0),
+        ("dt_max", np.inf),
+        ("adaptive_window", 0),
+        ("max_solve_retries", -1),
+        ("save_every", 0),
+        ("progress_interval", -1),
+        ("monitor_update_interval", 0),
+        ("max_iterations_per_step", 0),
+    ],
+)
+def test_invalid_core_options(name, value):
+    options = tdgl.SolverOptions(solve_time=1)
+    setattr(options, name, value)
+    with pytest.raises(SolverOptionsError):
+        options.validate()
+
+
+def test_terminal_current_validation_is_deterministic_and_scale_aware():
+    terminal_info = [
+        type("Terminal", (), {"name": "source"})(),
+        type("Terminal", (), {"name": "drain"})(),
+    ]
+    options = tdgl.SolverOptions(solve_time=1)
+    validate_terminal_currents(
+        {"source": 1.0, "drain": -1.0 + 1e-13}, terminal_info, options
+    )
+    with pytest.raises(ValueError, match="Unknown terminal"):
+        validate_terminal_currents(
+            {"source": 1.0, "drain": -1.0, "typo": 0.0}, terminal_info, options
+        )
+    with pytest.raises(ValueError, match="finite"):
+        validate_terminal_currents(
+            {"source": np.nan, "drain": 0.0}, terminal_info, options
+        )
 
 
 @pytest.mark.parametrize("current", [5.0, lambda t: 10])

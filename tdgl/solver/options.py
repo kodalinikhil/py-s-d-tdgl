@@ -1,3 +1,5 @@
+import math
+import numbers
 import warnings
 from dataclasses import dataclass
 from enum import Enum
@@ -34,6 +36,18 @@ class SolverOptions:
             given solve iteration before giving up.
         adaptive_time_step_multiplier: The factor by which to multiple the time
             step ``dt`` for each adaptive solve retry.
+        equilibrium_tolerance: If not ``None``, stop the simulation early when the
+            maximum absolute change over ``equilibrium_window`` accepted steps is
+            below this value. The order parameters are compared after removing the
+            optimal shared global phase rotation. When an induced vector potential
+            is part of the state, its change in the solver's fixed temporal gauge is
+            included as well. This extends the stationary-state criterion used by
+            Gonçalves et al. to prevent electromagnetic relaxation from being
+            mistaken for equilibrium. ``solve_time`` remains a hard upper bound.
+        equilibrium_window: Number of accepted steps separating the two
+            order-parameter configurations used in the equilibrium comparison.
+        equilibrium_min_time: Minimum simulation time before equilibrium stopping
+            is considered.
         terminal_psi: Fixed value for the order parameter in current terminals.
         output_file: Path to an HDF5 file in which to save the data.
             If the file name already exists, a unique name will be generated.
@@ -54,7 +68,11 @@ class SolverOptions:
         progress_interval: Minimum number of solve steps between progress bar updates.
         monitor: Plot data in real time as the simulation is running.
         monitor_update_interval: The monitor update interval in seconds.
-        include_screening: Whether to include screening in the simulation.
+        include_screening: Whether to include screening in the simulation. For
+            ``SPlusDModel`` and ``SPlusSModel`` this advances the model's local
+            bulk electromagnetic equation for the induced field ``B-H``. For
+            ``SingleBandModel`` it retains pyTDGL's thin-film Biot--Savart screening
+            calculation.
         max_iterations_per_step: The maximum number of screening iterations per solve
             step.
         screening_tolerance: Relative tolerance for the induced vector potential, used
@@ -62,6 +80,12 @@ class SolverOptions:
             step.
         screening_step_size: Step size :math:`\\alpha` for Polyak's method.
         screening_step_drag: Drag parameter :math:`\\beta` for Polyak's method.
+        s_plus_d_drive_current_x: Dimensionless x component of the homogeneous
+            bulk transport-current source for ``SPlusDModel`` local screening.
+            It is normalized so that the normal state has
+            ``E_x = s_plus_d_drive_current_x / beta_em``.
+        s_plus_d_drive_current_y: Dimensionless y component of the homogeneous
+            bulk transport-current source for ``SPlusDModel`` local screening.
         simulate_d_wave: Deprecated and ignored. Select the equation set with
             ``Layer(model=...)``.
     """
@@ -74,6 +98,9 @@ class SolverOptions:
     adaptive_window: int = 10
     max_solve_retries: int = 10
     adaptive_time_step_multiplier: float = 0.25
+    equilibrium_tolerance: Union[float, None] = None
+    equilibrium_window: int = 1000
+    equilibrium_min_time: float = 0.0
     output_file: Union[str, None] = None
     terminal_psi: Union[float, complex, None] = 0.0
     gpu: bool = False
@@ -90,6 +117,8 @@ class SolverOptions:
     screening_tolerance: float = 1e-3
     screening_step_size: float = 0.1
     screening_step_drag: float = 0.5
+    s_plus_d_drive_current_x: float = 0.0
+    s_plus_d_drive_current_y: float = 0.0
     simulate_d_wave: Union[bool, None] = None
 
     def validate(self) -> None:
@@ -100,20 +129,99 @@ class SolverOptions:
                 DeprecationWarning,
                 stacklevel=2,
             )
+        finite_values = {
+            "solve_time": self.solve_time,
+            "skip_time": self.skip_time,
+            "dt_init": self.dt_init,
+            "dt_max": self.dt_max,
+            "adaptive_time_step_multiplier": self.adaptive_time_step_multiplier,
+            "equilibrium_min_time": self.equilibrium_min_time,
+            "monitor_update_interval": self.monitor_update_interval,
+            "screening_tolerance": self.screening_tolerance,
+            "screening_step_size": self.screening_step_size,
+            "screening_step_drag": self.screening_step_drag,
+            "s_plus_d_drive_current_x": self.s_plus_d_drive_current_x,
+            "s_plus_d_drive_current_y": self.s_plus_d_drive_current_y,
+        }
+        if self.equilibrium_tolerance is not None:
+            finite_values["equilibrium_tolerance"] = self.equilibrium_tolerance
+        for name, value in finite_values.items():
+            if not isinstance(value, numbers.Real) or isinstance(value, bool):
+                raise SolverOptionsError(f"{name} must be a real number.")
+            if not math.isfinite(value):
+                raise SolverOptionsError(f"{name} must be finite.")
+
+        if self.solve_time <= 0:
+            raise SolverOptionsError("solve_time must be positive.")
+        if self.skip_time < 0:
+            raise SolverOptionsError("skip_time must be nonnegative.")
+        if self.dt_init <= 0 or self.dt_max <= 0:
+            raise SolverOptionsError("dt_init and dt_max must be positive.")
         if self.dt_init > self.dt_max:
             raise SolverOptionsError("dt_init must be less than or equal to dt_max.")
 
-        if self.terminal_psi is not None and not (0 <= abs(self.terminal_psi) <= 1):
-            raise SolverOptionsError(
-                "terminal_psi must be None or have absolute value in [0, 1]"
-                f" (got {self.terminal_psi})."
-            )
+        if self.terminal_psi is not None:
+            try:
+                terminal_abs = float(abs(self.terminal_psi))
+            except (TypeError, ValueError) as exc:
+                raise SolverOptionsError(
+                    "terminal_psi must be None or a finite scalar."
+                ) from exc
+            if not math.isfinite(terminal_abs) or not (0 <= terminal_abs <= 1):
+                raise SolverOptionsError(
+                    "terminal_psi must be None or have finite absolute value in [0, 1]"
+                    f" (got {self.terminal_psi})."
+                )
 
         if not (0 < self.adaptive_time_step_multiplier < 1):
             raise SolverOptionsError(
                 "adaptive_time_step_multiplier must be in (0, 1)"
                 f" (got {self.adaptive_time_step_multiplier})."
             )
+
+        if self.equilibrium_tolerance is not None and self.equilibrium_tolerance <= 0:
+            raise SolverOptionsError("equilibrium_tolerance must be positive or None.")
+
+        if (
+            not isinstance(self.equilibrium_window, numbers.Integral)
+            or isinstance(self.equilibrium_window, bool)
+            or self.equilibrium_window <= 0
+        ):
+            raise SolverOptionsError("equilibrium_window must be a positive integer.")
+        self.equilibrium_window = int(self.equilibrium_window)
+
+        if self.equilibrium_min_time < 0:
+            raise SolverOptionsError("equilibrium_min_time must be nonnegative.")
+
+        positive_integer_options = {
+            "adaptive_window": self.adaptive_window,
+            "save_every": self.save_every,
+            "max_iterations_per_step": self.max_iterations_per_step,
+        }
+        for name, value in positive_integer_options.items():
+            if (
+                not isinstance(value, numbers.Integral)
+                or isinstance(value, bool)
+                or value <= 0
+            ):
+                raise SolverOptionsError(f"{name} must be a positive integer.")
+            setattr(self, name, int(value))
+
+        nonnegative_integer_options = {
+            "max_solve_retries": self.max_solve_retries,
+            "progress_interval": self.progress_interval,
+        }
+        for name, value in nonnegative_integer_options.items():
+            if (
+                not isinstance(value, numbers.Integral)
+                or isinstance(value, bool)
+                or value < 0
+            ):
+                raise SolverOptionsError(f"{name} must be a nonnegative integer.")
+            setattr(self, name, int(value))
+
+        if self.monitor_update_interval <= 0:
+            raise SolverOptionsError("monitor_update_interval must be positive.")
 
         if not (0 < self.screening_step_drag <= 1):
             raise SolverOptionsError(
@@ -166,7 +274,7 @@ class SolverOptions:
                 import pypardiso  # type: ignore # noqa: F401
             except ImportError:
                 raise SolverOptionsError(
-                    "SparseSolver.CUPY requires an Intel CPU"
+                    "SparseSolver.PARDISO requires an Intel CPU"
                     " and the pypardiso Python package."
                 )
         if self.sparse_solver is SparseSolver.CUPY:

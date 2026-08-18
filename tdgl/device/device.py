@@ -10,13 +10,13 @@ import h5py
 import matplotlib.pyplot as plt
 import numpy as np
 import pint
-from IPython.display import HTML
 from matplotlib.patches import PathPatch
 from matplotlib.path import Path
 from matplotlib.tri import Triangulation
 from shapely import affinity
 from shapely.geometry import Point
 
+from .._html import make_html
 from ..em import ureg
 from ..finite_volume.mesh import Mesh
 from ..finite_volume.util import get_oriented_boundary
@@ -613,7 +613,7 @@ class Device:
             length_units=self.length_units,
         )
 
-    def mesh_stats(self, precision: int = 3) -> HTML:
+    def mesh_stats(self, precision: int = 3) -> Any:
         """When called with in Jupyter notebook, displays
         a table of information about the mesh.
 
@@ -630,7 +630,7 @@ class Device:
                 value = f"{value:.{precision}e}"
             html.append(f"<tr><td><b>{key}</b></td><td>{value}</td></tr>")
         html.append("</table>")
-        return HTML("".join(html))
+        return make_html("".join(html))
 
     def plot(
         self,

@@ -70,7 +70,8 @@ The pyTDGL dimensional scales, in SI, are~\cite{BishopVanHorn2023}
 \end{align}
 where $\xi$ is the coherence length, $\lambda$ the London penetration depth,
 $d$ the film thickness, $\Lambda=\lambda^2/d$, $\sigma$ the normal-state
-conductivity, and $\Phi_0=h/(2e)$ the flux quantum.  Solver variables are
+conductivity, and $\Phi_0=h/(2e)$ the flux quantum.  For the single-band,
+$d+d'$, and $s+s$ models, solver variables are
 \begin{equation}
     \mathbf r=\frac{\mathbf r_{\rm phys}}{\xi},\quad
     t=\frac{t_{\rm phys}}{\tau_0},\quad
@@ -84,6 +85,23 @@ Order parameters and code coefficients are dimensionless.  The source papers
 use Gaussian cgs; all dimensional formulas below are converted to SI, while
 dimensionless ratios are unit-system independent.
 
+The $s+d$ equations retain the source paper's order-parameter diffusion clock
+$t_\psi=\xi_d^2/\mathcal D$.  Their numerical transport current is therefore
+$\mathbf J_{\rm cond}/\beta_{\rm em}$.  Terminal currents are divided by
+$\beta_{\rm em}$ on input and solution currents are multiplied by it on output,
+so public currents still use the physical scale $K_0$ in
+Eq.~\eqref{eq:physical-scales}.
+
+The $s+s$ equations use two current conversions.  First,
+$c_{\rm em}\equiv\texttt{em\_coupling}$ maps the variational condensate current
+to the model's transport convention.  Second,
+$\beta_{\rm em}\equiv\texttt{beta\_em}$ sets the electromagnetic clock.  The
+current stored by the solver and used by the Poisson equation is
+$\mathbf j_s=\mathbf J_{\rm cond}/(c_{\rm em}\beta_{\rm em})$.  Terminal
+currents are divided by $\beta_{\rm em}$ on input and solution currents are
+multiplied by it on output, so the new coefficient is backward compatible at
+its default value one.
+
 For each model, current conservation is imposed through
 \begin{align}
     \mathbf j_n&=-\boldsymbol\nabla\mu-\partial_t\mathbf A,\\
@@ -92,11 +110,12 @@ For each model, current conservation is imposed through
           -\boldsymbol\nabla\!\cdot\partial_t\mathbf A,
     \label{eq:poisson-common}
 \end{align}
-where $\mathbf j_s$ is the transport-normalized supercurrent specified for
-each model below.  The multicomponent solvers presently use a prescribed
-vector potential; self-consistent magnetic screening is not implemented.
+where $\mathbf j_s$ is the Poisson-normalized supercurrent specified for each
+model below.  The $d+d'$ model uses a prescribed vector potential.  The $s+d$
+and $s+s$ models can also implement the local electromagnetic evolution given
+in their respective sections below.
 
-\section{s+d \cite{Goncalves2014,Zhu1999}}
+\section{s+d \cite{Goncalves2014,Zhu1999,Li1999}}
 
 \subsection{Order-parameter equations}
 
@@ -108,18 +127,36 @@ dimensionless $d+s$ framework of Refs.~\cite{Goncalves2014,Zhu1999}:
       +\varepsilon\psi_d-|\psi_d|^2\psi_d
       -\frac{\tau_3}{2}|\psi_s|^2\psi_d
       -\tau_4\psi_s^2\psi_d^*
-      +\eta_v(D_x^2-D_y^2)\psi_s,
+      +\eta_v(D_y^2-D_x^2)\psi_s,
     \label{eq:sd-d}\\
-    \eta_sD_t\psi_s={}&\eta_s(D_x^2+D_y^2)\psi_s
-      +\nu\psi_s-\tau_1|\psi_s|^2\psi_s
+    \eta_s r_s\,D_t\psi_s={}&\eta_s(D_x^2+D_y^2)\psi_s
+      +\nu_{\rm eff}\psi_s-\tau_1|\psi_s|^2\psi_s
       -\frac{\tau_3}{2}|\psi_d|^2\psi_s
       -\tau_4\psi_d^2\psi_s^*
-      +\eta_v(D_x^2-D_y^2)\psi_d.
+      +\eta_v(D_y^2-D_x^2)\psi_d.
     \label{eq:sd-s}
 \end{align}
 Here $\varepsilon=\varepsilon(\mathbf r,t)$ is the solver input
-\texttt{disorder\_epsilon}; it changes only the quadratic drive of the
-$d$ sector.  The standard homogeneous value is $\varepsilon=1$.
+\texttt{disorder\_epsilon}.  The effective $s$-sector coefficient is
+\begin{equation}
+    \nu_{\rm eff}=\nu+c_\nu(\varepsilon-1),
+    \qquad c_\nu=\texttt{nu\_disorder\_coupling}.
+    \label{eq:sd-nu-effective}
+\end{equation}
+Thus $\varepsilon$ changes only the $d$ quadratic drive when $c_\nu=0$, which
+is the default.  A nonzero $c_\nu$ allows the same spatial profile to model
+correlated suppression of both components, as needed for the twin boundaries
+in Ref.~\cite{Li1999}.  The standard homogeneous value is $\varepsilon=1$.
+The dimensionless $d$-sector stiffness and kinetic coefficient are both one:
+Gon\c{c}alves \textit{et al.} use the physical $d$-band stiffness to define
+$\xi_d$ and the common diffusion clock $t_0=\xi_d^2/\mathcal D$.  Thus the
+$d$ relaxation scale is implicit rather than absent.  The optional positive
+factor $r_s$ (\texttt{relaxation\_s}) multiplies only the $s$-sector kinetic
+coefficient.  Setting $r_s=1$ recovers Gon\c{c}alves Eqs.~(17)--(18); allowing
+$r_s\ne1$ represents a relative $s$-band relaxation time that is independent
+of the stiffness ratio $\eta_s$.  The legacy \texttt{Layer.u} coefficient is
+used only by the single-band KWT equation and does not set either relaxation
+scale in this multicomponent model.
 
 Define the mixed directional currents
 \begin{equation}
@@ -145,6 +182,50 @@ Eq.~\eqref{eq:poisson-common} is
 \end{equation}
 The opposite signs of the $x$ and $y$ mixed-current terms encode the
 $d_{x^2-y^2}$ symmetry.
+
+The implemented diagnostic \texttt{compute\_s\_plus\_d\_free\_energy}
+evaluates the discrete counterpart of the Gibbs functional
+\begin{align}
+ \mathcal G=\frac{1}{|\Omega|}\int_\Omega\!d^2r\,\bigl[&
+  -\varepsilon|\psi_d|^2-\nu_{\rm eff}|\psi_s|^2
+  +\tfrac12|\psi_d|^4+\tfrac{\tau_1}{2}|\psi_s|^4
+  +\tfrac{\tau_3}{2}|\psi_d|^2|\psi_s|^2\\
+  &+\tfrac{\tau_4}{2}
+    (\psi_s^{*2}\psi_d^2+\psi_d^{*2}\psi_s^2)
+  +|\mathbf D\psi_d|^2+\eta_s|\mathbf D\psi_s|^2\\
+  &+\eta_v\{(D_y\psi_s)^*D_y\psi_d+\mathrm{c.c.}
+               -(D_x\psi_s)^*D_x\psi_d-\mathrm{c.c.}\}
+  +\kappa_d^2(B-H)^2\bigr].
+\end{align}
+For the homogeneous paper model, $\varepsilon=1$; this is Eqs.~(78)--(79)
+with the same gauge and normalization conventions as above.
+
+With \texttt{include\_screening=True}, the vector potential obeys
+\begin{equation}
+    \beta_{\rm em}\partial_t\mathbf A
+      =\mathbf J_{\rm cond}
+       -\kappa_d^2(\partial_yB,-\partial_xB),
+    \qquad B=(\boldsymbol\nabla\times\mathbf A)_z,
+\end{equation}
+which is Eq.~(19) of Gon\c{c}alves \textit{et al.} in the $\phi=0$ gauge.
+The implementation writes $\mathbf A=\mathbf A_{\rm applied}
++\mathbf A_{\rm induced}$ and applies magnetic diffusion to
+$B-H=\boldsymbol\nabla\times\mathbf A_{\rm induced}$.  This is equivalent to
+the paper's $B=H$ vacuum boundary condition for a uniform applied field and
+remains variationally consistent for a nonuniform prescribed field.
+
+For an insulating boundary with outward normal $\mathbf n$, the natural
+order-parameter conditions generated by the same gradient functional are
+\begin{align}
+  \mathbf n\!\cdot\!\mathbf D\psi_d
+    +\eta_v(-n_xD_x+n_yD_y)\psi_s&=0,\\
+  \eta_s\mathbf n\!\cdot\!\mathbf D\psi_s
+    +\eta_v(-n_xD_x+n_yD_y)\psi_d&=0.
+\end{align}
+Substitution into the condensate current of Eq.~(8) gives
+$\mathbf J_s\!\cdot\!\mathbf n=0$, precisely Eq.~(12) of Gon\c{c}alves
+\textit{et al.}; the finite-element assembly enforces these as variational
+natural boundary conditions.
 
 \subsection{Dimensional origin and SI units}
 
@@ -178,7 +259,7 @@ The remaining source scales are
     \lambda_d^2&=\frac{2m_d^*\beta_2}
         {\mu_0(e^*)^2\alpha_d},\\
     \kappa_d&=\frac{\lambda_d}{\xi_d}, &
-    B_{c2}&=\frac{\Phi_0}{2\pi\xi_d^2}, &
+    B_{0,d}&\equiv H_{c2,d}^{(0)}=\frac{\Phi_0}{2\pi\xi_d^2}, &
     \Phi_0&=\frac{h}{2e}.
     \label{eq:sd-source-scales}
 \end{align}
@@ -187,7 +268,50 @@ SI units are: $m_i^*$ [kg], $\mathcal D$ [$\mathrm{m^2\,s^{-1}}$], $\sigma$
 [$\mathrm{T\,m}$], and $\Phi_0$ [Wb].  Each set
 $(\alpha_s,\alpha_d)$ and $(\beta_1,\ldots,\beta_4)$ must use common compatible
 units; their ratios are dimensionless for any consistent order-parameter
-normalization.
+normalization.  $B_{0,d}$ is the nominal pure-$d$ field scale stored by the
+code as \texttt{device.Bc2} and denoted $B_0$ by Li \textit{et al.}; it is not
+the $\alpha_s$-dependent upper critical field of the mixed state.
+
+\subsection{Mapping the Li--Wang--Wang dynamics}
+
+Li, Wang, and Wang write separate phenomenological kinetic coefficients
+$\eta_s^{\rm L}$ and $\eta_d^{\rm L}$ for their fields $S$ and $D$, with
+$q\equiv\eta_s^{\rm L}=2\eta_d^{\rm L}$~\cite{Li1999}.  Identifying
+$\psi_s=S$ and $\psi_d=D$, first multiply their $S$ equation by two so that
+its mixed-gradient term has the same variational coefficient as the $D$
+equation.  The static parameter map is then
+\begin{equation}
+  \eta_s=2,\qquad \eta_v=-1,\qquad \nu=2\alpha_s,\qquad
+  \tau_1=\frac83,\qquad \tau_3=\frac{16}{3},\qquad
+  \tau_4=\frac43.
+  \label{eq:li-static-map}
+\end{equation}
+Use the $d$-component clock
+\begin{equation}
+  t_{\rm code}=\frac{t_{\rm L}}{\eta_d^{\rm L}}
+              =\frac{2t_{\rm L}}{q}.
+\end{equation}
+The $D$ kinetic coefficient is thereby one, while the $S$ coefficient is
+$2\eta_s^{\rm L}/\eta_d^{\rm L}=4$.  Since the code writes that coefficient
+as $\eta_s r_s$, the dynamical map is
+\begin{equation}
+  r_s=2,\qquad \beta_{\rm em}=\frac{1}{\eta_d^{\rm L}}=\frac{2}{q},
+  \qquad
+  \mathbf E_{\rm L}=-\partial_{t_{\rm L}}\mathbf A
+       =\beta_{\rm em}\mathbf E_{\rm code}.
+  \label{eq:li-dynamic-map}
+\end{equation}
+Consequently, $q$ changes the common physical clock and electromagnetic
+coefficient, whereas $r_s=2$ carries the relative $S$--$D$ kinetic factor
+that cannot be represented by the static stiffness $\eta_s$ alone.
+
+For a twin profile $g(\mathbf r)$ with
+$\alpha_i=\alpha_{i,0}-u_i g$, the script uses
+\begin{equation}
+  \varepsilon=1-u_dg,\qquad c_\nu=\frac{2u_s}{u_d},
+\end{equation}
+so that Eq.~\eqref{eq:sd-nu-effective} gives
+$\nu_{\rm eff}=2\alpha_s-2u_sg$.  The ratio is used only for $u_d>0$.
 
 \subsection{Parameters}
 
@@ -199,13 +323,15 @@ N.B. Theoretical values for the parameters have been derived microscopically, co
 Code name & Meaning & Default\\
 \midrule
 \endhead
-$\eta_s$ (\texttt{eta\_s}) & Effective-mass ratio $m_d^*/m_s^*$; sets relative $s$-sector stiffness and the coefficient of $D_t\psi_s$. & $1$\\
+$\eta_s$ (\texttt{eta\_s}) & Effective-mass ratio $m_d^*/m_s^*$; sets the relative $s$-sector stiffness and the base kinetic multiplier.  The full coefficient of $D_t\psi_s$ is $\eta_s r_s$. & $1$\\
+$r_s$ (\texttt{relaxation\_s}) & Extra $s$-sector kinetic multiplier; $r_s=1$ is the Gon\c{c}alves common-diffusion model, while $\eta_s r_s$ is the implemented $s$ coefficient of $D_t\psi_s$. & $1$\\
 $\eta_v$ (\texttt{eta\_v}) & Mixed-gradient effective-mass ratio $m_d^*/m_v^*$, responsible for the anisotropic $s$--$d$ coupling. & $0$\\
-$\nu$ (\texttt{nu}) & Quadratic ratio $\alpha_s/\alpha_d$; gives the free-energy term $-\nu|\psi_s|^2$. & $-1$\\
+$\nu$ (\texttt{nu}) & Homogeneous quadratic ratio $\alpha_s/\alpha_d$; it is the base value in the free-energy term $-\nu_{\rm eff}|\psi_s|^2$. & $-1$\\
+$c_\nu$ (\texttt{nu\_\allowbreak disorder\_\allowbreak coupling}) & Optional coupling of the disorder profile into the $s$ quadratic coefficient, $\nu_{\rm eff}=\nu+c_\nu(\varepsilon-1)$. & $0$\\
 $\tau_1$ (\texttt{tau1}) & Quartic ratio $\beta_1/\beta_2$, comparing the $s$ self-interaction with the $d$ self-interaction. & $1$\\
 $\tau_3$ (\texttt{tau3}) & Density-coupling ratio $\beta_3/\beta_2$; TDGL cross-density coefficient $\tau_3/2$. & $0$\\
 $\tau_4$ (\texttt{tau4}) & Phase-sensitive quartic ratio $\beta_4/\beta_2$, coupling $\psi_s^2\psi_d^*$ and $\psi_d^2\psi_s^*$. & $0$\\
-$\beta_{\rm em}$ (\texttt{beta\_em}) & SI electromagnetic factor $\beta=\mu_0\sigma\kappa_d^2\mathcal D$.  Since the solver prescribes $\mathbf A$ rather than evolving the paper's $\beta\partial_t\mathbf A$ equation, this field acts only as the current divisor in Eq.~\eqref{eq:sd-current}. & $1$\\
+$\beta_{\rm em}$ (\texttt{beta\_em}) & SI electromagnetic factor $\beta=\mu_0\sigma\kappa_d^2\mathcal D$; it controls Eq.~(19) when screening is enabled and divides the stored transport current in Eq.~\eqref{eq:sd-current}. & $1$\\
 $\varepsilon$ (\texttt{disorder\_\allowbreak epsilon}) & Local $d$-sector quadratic coefficient, interpretable as $\alpha_d(\mathbf r,t)/\alpha_{d,\rm ref}$; the homogeneous Gon\c{c}alves normalization gives $\varepsilon=1$. & $1$\\
 \bottomrule
 \end{longtable}
@@ -213,7 +339,7 @@ $\varepsilon$ (\texttt{disorder\_\allowbreak epsilon}) & Local $d$-sector quadra
 
 The validation conditions are
 \begin{equation}
-    \eta_s>0,\qquad \eta_s>\eta_v^2,\qquad
+    \eta_s>0,\qquad r_s>0,\qquad \eta_s>\eta_v^2,\qquad
     \tau_1>0,\qquad \beta_{\rm em}>0,
 \end{equation}
 with $\varepsilon\leq1$ enforced by the solver.  The condition
@@ -229,14 +355,18 @@ Nevertheless, the implementation's local Ohmic normal current and diffusive
 relaxation are dirty-limit-like; quantitative dynamics require material-specific
 scattering and relaxation parameters.
 
-The field $\varepsilon(\mathbf r,t)$ changes only the $d$-sector quadratic
-coefficient and is not a complete microscopic disorder model.  The factor
-$\beta_{\rm em}$ is only the current normalization in
-Eq.~\eqref{eq:sd-current}.  A scalar terminal value fixes $\psi_d$ and sets
+By default the field $\varepsilon(\mathbf r,t)$ changes only the $d$-sector
+quadratic coefficient; Eq.~\eqref{eq:sd-nu-effective} optionally correlates
+the $s$-sector suppression.  This remains a phenomenological rather than a
+complete microscopic disorder model.  A scalar
+terminal value fixes $\psi_d$ and sets
 $\psi_s=0$ at terminal sites, which is a numerical contact model rather than a
 general $s+d$ interface condition.
 
-Note that $H_{c2}$ here is for a pure d-wave and therefore the ``actual" $H_{c2}$ could be different (a possible simulation result).
+The nominal $H_{c2,d}^{(0)}$ used for nondimensionalization is the pure-$d$
+scale.  The mixed-state upper critical field is generally different and must
+be computed from the coupled equations, for example from the linearized Li
+eigenproblem used by the reproduction script.
 
 \section{d+d' \cite{Lei2000, Wang1999Orbital}}
 
@@ -305,9 +435,10 @@ $d'/d=-i|d'/d|$; reversing the field reverses the favored chirality.
 Because Eq.~\eqref{eq:ddp-free-energy} has equal diagonal stiffnesses and no
 mixed-gradient term, the implemented condensate and transport currents are
 \begin{align}
-    \mathbf J_{\rm cond}
+    \mathbf J_{\rm diag}
       &=\operatorname{Im}(d^*\mathbf Dd)
         +\operatorname{Im}(d'^*\mathbf Dd'),\\
+    \mathbf J_{\rm cond}&=\mathbf J_{\rm diag}+\mathbf J_Z,\\
     \mathbf j_s&=\frac{\mathbf J_{\rm cond}}{c_{\rm em}},
     \qquad c_{\rm em}\equiv\texttt{em\_coupling}.
     \label{eq:ddp-current}
@@ -324,6 +455,9 @@ This is the order-parameter orbital contribution and excludes the derivative
 of the separately prescribed $\kappa^2b^2$ field energy.
 Equation~\eqref{eq:ddp-magnetization} is exposed as the diagnostic
 \texttt{Solution.\allowbreak orbital\_\allowbreak magnetization}.
+The bound current $\mathbf J_Z$ is evaluated as the exact discrete derivative
+of $-\int m_zb\,d^2r$ with respect to the edge vector potential.  It is included
+in the current used by the transport Poisson solve.
 
 The discrete condensate free-energy diagnostic includes the local potential,
 gradient energy, and orbital-Zeeman energy in
@@ -369,64 +503,129 @@ implement the microscopic extension of Ref.~\cite{Wang1999Orbital}.
 
 The model has equal component stiffnesses, no mixed-gradient term, and fixed
 quadratic coefficients, so nonuniform \texttt{disorder\_epsilon} is unsupported.
-The reported orbital magnetization omits its bound current from the transport
-Poisson solve.  Transport terminals require \texttt{terminal\_psi=None} and
-natural order-parameter boundary conditions.
+Transport terminals require \texttt{terminal\_psi=None} and natural
+order-parameter boundary conditions.
 
-\section{s+s \cite{Zhitomirsky2004,Kogan2011}}
+\section{s+s and s+is \cite{Zhitomirsky2004,Kogan2011,Lin2016}}
 
 \subsection{Free energy and order-parameter equations}
 
 Let $\psi_1$ and $\psi_2$ denote the two dimensionless isotropic $s$-wave
-band order parameters.  With $k_1=1$ and
-$k_2=k_{2/1}\equiv\texttt{k2\_over\_k1}$, the dimensionless condensate
-free-energy density follows Refs.~\cite{Zhitomirsky2004,Kogan2011}:
+components.  Define
+\begin{align}
+  k_2&=k_{2/1}\equiv\texttt{k2\_over\_k1},&
+  k_{12}&\equiv\texttt{mixed\_gradient\_k12},\\
+  \gamma_J&\equiv\texttt{josephson\_gamma},&
+  \gamma_2&\equiv\texttt{phase\_gamma2},&
+  \gamma_3&\equiv\texttt{density\_gamma3}.
+\end{align}
+The two components share the solver disorder profile $\varepsilon(\mathbf r,t)$,
+but have independently tunable responses
 \begin{equation}
-    f=\sum_{n=1}^{2}\left[
-        a_n|\psi_n|^2+\frac{b_n}{2}|\psi_n|^4
-        +k_n|\mathbf D\psi_n|^2
-    \right]
-    -\gamma_{12}\left(\psi_1\psi_2^*+\psi_2\psi_1^*\right).
-    \label{eq:ss-free-energy}
+  a_{i,{\rm eff}}(\mathbf r,t)
+    =a_i+c_i[1-\varepsilon(\mathbf r,t)],
+  \qquad
+  c_1\equiv\texttt{disorder\_coupling1},\quad
+  c_2\equiv\texttt{disorder\_coupling2}.
+  \label{eq:ss-disorder}
 \end{equation}
+A positive $c_i$ therefore suppresses component $i$ where $\varepsilon<1$.
+With $k_1=1$, the implemented dimensionless free-energy density is
+\begin{align}
+  f={}&a_{1,{\rm eff}}|\psi_1|^2+a_{2,{\rm eff}}|\psi_2|^2
+    +\frac{b_1}{2}|\psi_1|^4+\frac{b_2}{2}|\psi_2|^4\\
+  &-\gamma_J(\psi_1\psi_2^*+\psi_2\psi_1^*)
+    +\frac{\gamma_3}{2}|\psi_1|^2|\psi_2|^2
+    +\frac{\gamma_2}{2}
+       (\psi_1^{*2}\psi_2^2+\psi_2^{*2}\psi_1^2)\\
+  &+|\mathbf D\psi_1|^2+k_2|\mathbf D\psi_2|^2
+    +k_{12}\left[(\mathbf D\psi_1)^*\!\cdot\mathbf D\psi_2
+                  +(\mathbf D\psi_2)^*\!\cdot\mathbf D\psi_1\right].
+    \label{eq:ss-free-energy}
+\end{align}
+The first line and the bilinear term give the minimal two-band model of
+Refs.~\cite{Zhitomirsky2004,Kogan2011}.  The $\gamma_2$, $\gamma_3$, and
+$k_{12}$ terms add the phase-sensitive quartic, density, and isotropic
+mixed-gradient couplings used for the $s+is$ model of Ref.~\cite{Lin2016}.
+
 The implemented dissipative extension is the negative gradient flow of
 Eq.~\eqref{eq:ss-free-energy}:
 \begin{align}
     r_1D_t\psi_1={}&(D_x^2+D_y^2)\psi_1
-      -a_1\psi_1-b_1|\psi_1|^2\psi_1+\gamma_{12}\psi_2,
+      +k_{12}(D_x^2+D_y^2)\psi_2
+      -a_{1,{\rm eff}}\psi_1-b_1|\psi_1|^2\psi_1
+      -\frac{\gamma_3}{2}|\psi_2|^2\psi_1
+      -\gamma_2\psi_2^2\psi_1^*+\gamma_J\psi_2,
     \label{eq:ss-1}\\
-    r_2D_t\psi_2={}&k_{2/1}(D_x^2+D_y^2)\psi_2
-      -a_2\psi_2-b_2|\psi_2|^2\psi_2+\gamma_{12}\psi_1.
+    r_2D_t\psi_2={}&k_2(D_x^2+D_y^2)\psi_2
+      +k_{12}(D_x^2+D_y^2)\psi_1
+      -a_{2,{\rm eff}}\psi_2-b_2|\psi_2|^2\psi_2
+      -\frac{\gamma_3}{2}|\psi_1|^2\psi_2
+      -\gamma_2\psi_1^2\psi_2^*+\gamma_J\psi_1.
     \label{eq:ss-2}
 \end{align}
-The unscaled condensate current and the transport-normalized current are
+The variational condensate current, transport current, and Poisson-normalized
+current are
 \begin{align}
     \mathbf J_{\rm cond}
       &=\operatorname{Im}(\psi_1^*\mathbf D\psi_1)
-        +k_{2/1}\operatorname{Im}(\psi_2^*\mathbf D\psi_2),\\
-    \mathbf j_s&=\frac{\mathbf J_{\rm cond}}{c_{\rm em}},
-    \qquad c_{\rm em}\equiv\texttt{em\_coupling}.
+        +k_2\operatorname{Im}(\psi_2^*\mathbf D\psi_2)\\
+      &\quad+k_{12}\operatorname{Im}
+        (\psi_1^*\mathbf D\psi_2+\psi_2^*\mathbf D\psi_1),\\
+    \mathbf J_{\rm transport}&=\frac{\mathbf J_{\rm cond}}{c_{\rm em}},&
+    \mathbf j_s&=\frac{\mathbf J_{\rm transport}}{\beta_{\rm em}}.
     \label{eq:ss-current}
 \end{align}
-A positive $\gamma_{12}$ minimizes the energy for equal component phases; a
-negative value favors a relative phase of $\pi$.
+A positive $\gamma_J$ minimizes the energy for equal component phases; a
+negative value favors a relative phase of $\pi$.  When $\gamma_J=0$, a
+positive $\gamma_2$ favors the time-reversal-related relative phases
+$\arg(\psi_2/\psi_1)=\pm\pi/2$ of an $s+is$ state.
+
+With \texttt{include\_screening=True}, local electromagnetic relaxation uses
+\begin{equation}
+  \beta_{\rm em}\partial_t\mathbf A
+    =\mathbf J_{\rm cond}
+      -\kappa^2(\partial_yB,-\partial_xB),
+  \qquad B=(\boldsymbol\nabla\times\mathbf A)_z.
+  \label{eq:ss-screening}
+\end{equation}
+The implementation evolves $B-H$ with the boundary condition $B=H$.  Local
+screening requires $c_{\rm em}=1$ so that Eq.~\eqref{eq:ss-screening} is the
+variation of the same free energy as Eqs.~\eqref{eq:ss-1}--\eqref{eq:ss-2}.
+Prescribed-vector-potential simulations retain arbitrary positive
+$c_{\rm em}$.  In both modes, stored currents use Eq.~\eqref{eq:ss-current};
+public physical currents restore the factor $\beta_{\rm em}$.
+
+The variational insulating-boundary conditions are coupled when $k_{12}\ne0$:
+\begin{align}
+  \mathbf n\!\cdot\!\mathbf D\psi_1
+    +k_{12}\mathbf n\!\cdot\!\mathbf D\psi_2&=0,\\
+  k_2\mathbf n\!\cdot\!\mathbf D\psi_2
+    +k_{12}\mathbf n\!\cdot\!\mathbf D\psi_1&=0.
+\end{align}
 
 \subsection{Dimensional origin and SI units}
 
-The Kogan--Schmalian two-band functional, converted from Gaussian cgs to SI,
-is
-\begin{equation}
-    F_{\rm SI}=\int dV\left\{
+The minimal Kogan--Schmalian coefficients have the microscopic clean-limit
+form below.  A phenomenological SI functional that also includes the
+Ref.~\cite{Lin2016} couplings is
+\begin{align}
+    F_{\rm SI}={}&\int dV\,\biggl\{
       \sum_{\nu=1}^{2}\left[
         a_\nu^{(G)}|\Delta_\nu|^2
         +\frac{b_\nu^{(G)}}{2}|\Delta_\nu|^4
         +K_\nu^{(G)}|\boldsymbol\Pi\Delta_\nu|^2
       \right]
-      -\gamma^{(G)}(\Delta_1\Delta_2^*+\Delta_2\Delta_1^*)
+      -\gamma_J^{(G)}(\Delta_1\Delta_2^*+\Delta_2\Delta_1^*)\\
+      &+\frac{\Gamma_3^{(G)}}{2}|\Delta_1|^2|\Delta_2|^2
+       +\frac{\Gamma_2^{(G)}}{2}
+         (\Delta_1^{*2}\Delta_2^2+\Delta_2^{*2}\Delta_1^2)\\
+      &+K_{12}^{(G)}\left[(\boldsymbol\Pi\Delta_1)^*\!\cdot
+                              \boldsymbol\Pi\Delta_2+\mathrm{c.c.}\right]
       +\frac{B^2}{2\mu_0}
-    \right\},
+    \biggr\},
     \label{eq:ss-dimensional-si}
-\end{equation}
+\end{align}
 where $\boldsymbol\Pi=\boldsymbol\nabla+2\pi i\mathbf A/\Phi_0$,
 $\Phi_0=h/(2e)$, and $\Delta_\nu$ is the dimensional band gap.  Superscript
 $(G)$ labels dimensional GL coefficients, not powers.
@@ -438,7 +637,7 @@ For the clean, isotropic weak-coupling model, the paper gives
       &=\frac{N(0)}{\eta_\lambda}
         \left(S_\nu-n_\nu\eta_\lambda\tau\right),&
     b_\nu^{(G)}&=\frac{N(0)}{W^2}n_\nu,\\
-    \gamma^{(G)}&=\frac{N(0)}{\eta_\lambda}\lambda_{12},&
+    \gamma_J^{(G)}&=\frac{N(0)}{\eta_\lambda}\lambda_{12},&
     K_\nu^{(G)}&=\frac{N(0)\hbar^2v_\nu^2}{6W^2}n_\nu,
     \label{eq:ss-microscopic-coefficients}\\
     \eta_\lambda&=\lambda_{11}\lambda_{22}-\lambda_{12}^2,&
@@ -457,9 +656,9 @@ are one weak-coupling realization; Eq.~\eqref{eq:ss-dimensional-si} also
 applies phenomenologically.
 
 SI units are: $\Delta_\nu,W,k_BT_c$ [J], $N(0)$
-[$\mathrm{J^{-1}m^{-3}}$], $a_\nu^{(G)},\gamma^{(G)}$
-[$\mathrm{J^{-1}m^{-3}}$], $b_\nu^{(G)}$
-[$\mathrm{J^{-3}m^{-3}}$], $K_\nu^{(G)}$
+[$\mathrm{J^{-1}m^{-3}}$], $a_\nu^{(G)},\gamma_J^{(G)}$
+[$\mathrm{J^{-1}m^{-3}}$], $b_\nu^{(G)},\Gamma_2^{(G)},\Gamma_3^{(G)}$
+[$\mathrm{J^{-3}m^{-3}}$], $K_\nu^{(G)},K_{12}^{(G)}$
 [$\mathrm{J^{-1}m^{-1}}$], $v_\nu$ [$\mathrm{m\,s^{-1}}$], $\mathbf A$
 [$\mathrm{T\,m}$], $B$ [T], and $F_{\rm SI}$ [J].
 $n_\nu,\lambda_{\nu\mu},\eta_\lambda,S,\tau$ are dimensionless.
@@ -470,10 +669,117 @@ $f_0=K_1^{(G)}\Delta_0^2/\xi^2$, the code coefficients are
     a_\nu&=\frac{a_\nu^{(G)}\xi^2}{K_1^{(G)}},&
     b_\nu&=\frac{b_\nu^{(G)}\Delta_0^2\xi^2}{K_1^{(G)}},\\
     k_{2/1}&=\frac{K_2^{(G)}}{K_1^{(G)}},&
-    \gamma_{12}&=\frac{\gamma^{(G)}\xi^2}{K_1^{(G)}}.
+    k_{12}&=\frac{K_{12}^{(G)}}{K_1^{(G)}},\\
+    \gamma_J&=\frac{\gamma_J^{(G)}\xi^2}{K_1^{(G)}},&
+    \gamma_{2,3}&=\frac{\Gamma_{2,3}^{(G)}\Delta_0^2\xi^2}
+                         {K_1^{(G)}}.
     \label{eq:ss-code-map}
 \end{align}
+If $a_{i,{\rm eff}}^{(G)}=a_i^{(G)}+c_i^{(G)}(1-\varepsilon)$,
+then $c_i=c_i^{(G)}\xi^2/K_1^{(G)}$ in the same scaling.
 Other scales are equivalent if the whole functional is rescaled consistently.
+
+\subsection{Paper-aligned $s+is$ example}
+
+Ref.~\cite{Lin2016} does not provide a complete nondimensionalization into the
+repository's variables.  Assuming the code's band-1 $K_1$/$\xi_1$/$\Delta_0$
+scaling, its illustrative mass choice $m_1=m_c=1$, $m_2=2$ maps to
+\begin{equation}
+\begin{split}
+  &a_1=a_2=-1,\qquad b_1=b_2=1,\qquad
+  k_{2/1}=\frac{m_1}{m_2}=0.5,\\
+  &\gamma_J=0,\qquad \gamma_2=0.5,\qquad \gamma_3=0,\qquad
+  k_{12}=\frac{m_1}{2m_c}=0.5.
+\end{split}
+\label{eq:ss-lin-example}
+\end{equation}
+These values favor the two $s+is$ relative phases $\pm\pi/2$.  If one
+additionally assumes equal physical diffusion constants, the band-1 clock
+would give $r_2=0.5$; that is an extra dynamical assumption, not a value
+specified by Ref.~\cite{Lin2016}.
+
+\subsection{Lin--Maiti--Chubukov defect comparison}
+
+The reproducibility driver
+\path{my_scripts/reproduce_lin_maiti_chubukov_prb94_064519.py} targets
+Figs.~3 and 4 of Ref.~\cite{Lin2016}.  They are the most convenient tests of
+the distinction because both use the same GL coefficients, require no vortex
+initial condition, and test complementary predictions: the weak-defect power
+law and the spatial symmetry of the induced field.  In both models the script
+uses
+\begin{equation}
+ \alpha_1=\alpha_2=-1,\quad \beta_1=\beta_2=1,\quad
+ \gamma_2=0.5,\quad \gamma_1=\gamma_3=0,\quad
+ m_1=m_c=1,\quad m_2=2.
+ \label{eq:lin-common-parameters}
+\end{equation}
+The $s+is$ code map is Eq.~\eqref{eq:ss-lin-example}, augmented by
+$c_1=c_2=1$.  With a defect indicator $\chi_D$ and strength
+$\widetilde\alpha$, the common solver profile
+\begin{equation}
+ \varepsilon=1-\widetilde\alpha\chi_D
+ \label{eq:lin-defect-profile}
+\end{equation}
+then gives $a_{i,{\rm eff}}=-1+\widetilde\alpha\chi_D$, exactly the
+paper's quadratic-coefficient defect.
+
+The repository stores the $s+d$ fields as $\psi_1=\psi_s$ and
+$\psi_2=\psi_d$ and uses the $d$-sector stiffness and coherence length as its
+units.  The corresponding $s+id$ parameters are
+\begin{equation}
+ \eta_s=2,\qquad \eta_v=-1,\qquad \nu=1,\qquad
+ \tau_1=1,\qquad \tau_3=0,\qquad \tau_4=0.5,\qquad c_\nu=1.
+ \label{eq:lin-sid-map}
+\end{equation}
+The negative $\eta_v$ converts the code's $y$-minus-$x$ directional
+convention to the paper's $x$-minus-$y$ convention.  Equation
+\eqref{eq:lin-defect-profile} makes both $s+id$ quadratic drives equal to
+$1-\widetilde\alpha\chi_D$.  Since
+$\xi_1/\xi_d=\sqrt{m_2/m_1}=\sqrt2$, comparison in the paper's units requires
+\begin{equation}
+ \mathbf r_{\rm code}=\sqrt2\,\frac{\mathbf r_{\rm paper}}{\xi_1},
+ \qquad
+ \frac{B_{\rm paper}}{H_{c2,1}}=2\frac{B_{\rm code}}{B_{c2,d}}.
+ \label{eq:lin-sid-unit-map}
+\end{equation}
+Both models are initialized in one homogeneous chiral minimum,
+$\psi_1=\sqrt2$ and $\psi_2=i\sqrt2$; changing the chirality reverses the
+field without changing the reported magnitude.
+
+For the Fig.~3 analogue, the square-defect indicator is
+\begin{equation}
+ \chi_D=\Theta(r_0-|x|)\Theta(r_0-|y|),
+ \qquad r_0=1.5,
+\end{equation}
+and the script fits $\max|B-B_0|=C\widetilde\alpha^p$ on a logarithmic
+strength scan.  The expected signatures are $p=2$ for $s+is$ and $p=1$ for
+$s+id$.  For the Fig.~4 analogue,
+\begin{equation}
+ \chi_D=\Theta(r_0-|x|)\Theta(r_0-|y|),\qquad
+ r_0=1,\qquad \widetilde\alpha=0.5,
+\end{equation}
+which yields the fourfold corner pattern of $s+is$ and the twofold pattern of
+$s+id$.  Each field-map panel uses its own symmetric color range because the
+absolute amplitudes can differ by orders of magnitude.
+
+The driver uses a $D_4$-symmetric triangular mesh, temporal gauge, local
+screening, and subtraction of the identically discretized zero-defect field
+$B_0$.  It takes $\beta_{\rm em}=r_1=r_2=r_s=1$ as a numerical relaxation
+convention; these kinetic choices do not change the static extrema.
+Ref.~\cite{Lin2016} does not specify the finite domain, mesh, boundary
+conditions, diffusion constants, conductivity, or penetration depth.  The
+script therefore takes $\lambda/\xi_1=4$ by default (and
+$\kappa_d=4\sqrt2$ for $s+id$) and presents a finite-domain reproduction of
+the symmetry and scaling laws rather than a pixel-level prediction of the
+absolute field.  The three resolution presets can be run as
+\begin{verbatim}
+SCRIPT=my_scripts/reproduce_lin_maiti_chubukov_prb94_064519.py
+python "$SCRIPT" --preset smoke
+python "$SCRIPT" --preset quick
+python "$SCRIPT" --preset paper
+\end{verbatim}
+Existing HDF5 checkpoints are reused; \texttt{--plot-only} redraws their
+figures and \texttt{--force} recomputes the selected cases.
 
 \subsection{Parameters}
 
@@ -486,19 +792,31 @@ Code name & Meaning & Default\\
 $a_1$ (\texttt{a1}), $a_2$ (\texttt{a2}) & Dimensionless $a_\nu^{(G)}$; contain a constant interband contribution and a term proportional to $1-T/T_c$. & $-1,-1$\\
 $b_1$ (\texttt{b1}), $b_2$ (\texttt{b2}) & Dimensionless quartic self-interactions corresponding to $b_\nu^{(G)}=N(0)n_\nu/W^2$. & $1,1$\\
 $k_{2/1}$ (\texttt{k2\_over\_k1}) & Stiffness ratio $K_2^{(G)}/K_1^{(G)}$; depends on band fractions and squared Fermi velocities. & $1$\\
-$\gamma_{12}$ (\texttt{josephson\_gamma}) & Dimensionless interband Josephson coupling corresponding to $\gamma^{(G)}=N(0)\lambda_{12}/\eta_\lambda$. & $0$\\
+$k_{12}$ (\texttt{mixed\_gradient\_k12}) & Isotropic intercomponent gradient coupling $K_{12}^{(G)}/K_1^{(G)}$. & $0$\\
+$\gamma_J$ (\texttt{josephson\_gamma}) & Dimensionless bilinear Josephson coupling corresponding to $\gamma_J^{(G)}=N(0)\lambda_{12}/\eta_\lambda$ in the minimal clean model. & $0$\\
+$\gamma_2$ (\texttt{phase\_gamma2}) & Phase-sensitive quartic coupling; positive values favor relative phase $\pm\pi/2$ when the bilinear term vanishes. & $0$\\
+$\gamma_3$ (\texttt{density\_gamma3}) & Intercomponent density-density quartic coupling. & $0$\\
+$c_1,c_2$ (\texttt{disorder\_coupling1}, \texttt{disorder\_coupling2}) & Responses of the two quadratic coefficients to the shared profile in Eq.~\eqref{eq:ss-disorder}. & $0,0$\\
 $r_1$ (\texttt{relaxation1}), $r_2$ (\texttt{relaxation2}) & Phenomenological TDGL kinetic coefficients; absent from the static Kogan--Schmalian functional. & $1,1$\\
-$c_{\rm em}$ (\texttt{em\_coupling}) & Implementation-specific conversion from condensate-current normalization to the transport normalization used by the Poisson solver; it is not a coefficient in the static source functional. & $1$\\
+$c_{\rm em}$ (\texttt{em\_coupling}) & Condensate-to-transport current conversion. Local screening requires one for variational consistency. & $1$\\
+$\beta_{\rm em}$ (\texttt{beta\_em}) & Electromagnetic relaxation and stored-current normalization in Eqs.~\eqref{eq:ss-current}--\eqref{eq:ss-screening}. & $1$\\
 \bottomrule
 \end{longtable}
 }
 
 \enlargethispage{3\baselineskip}
 The validation conditions are
+\begin{align}
+    &b_1>0,\qquad b_2\geq0,\qquad k_2>0,\qquad k_{12}^2<k_2,\\
+    &r_1>0,\qquad r_2>0,\qquad c_{\rm em}>0,\qquad
+      \beta_{\rm em}>0.
+\end{align}
+For $b_2>0$, quartic coercivity additionally requires
 \begin{equation}
-    b_1>0,\qquad b_2>0,\qquad k_{2/1}>0,\qquad
-    r_1>0,\qquad r_2>0,\qquad c_{\rm em}>0.
+  \frac{\gamma_3}{2}-|\gamma_2|>-\sqrt{b_1b_2}.
 \end{equation}
+For the passive-band case $b_2=0$, the stricter conditions are $a_2>0$ and
+$\gamma_3/2-|\gamma_2|\geq0$.
 $a_1,a_2$ may have either sign; an uncoupled uniform band with $a_n<0$ has
 $|\psi_n|=\sqrt{-a_n/b_n}$.
 
@@ -511,12 +829,20 @@ also has dirty-limit derivations, but those dirty microscopic coefficients are
 not encoded here.  The relaxation coefficients $r_1,r_2$ remain
 phenomenological.
 
-The fixed-temperature coefficients $a_1,a_2$ require
-\texttt{disorder\_epsilon}$=1$, and the model omits interband gradient drag and
-impurity-induced interband scattering.  Near $T_c$, the two stored fields do
-not imply two independent GL coherence lengths.  The factor $c_{\rm em}$ is a
-current normalization, and scalar terminal order-parameter values are
-unsupported because their two-band mapping is unspecified.
+Equation~\eqref{eq:ss-disorder} is a phenomenological, linear response of both
+quadratic coefficients to one shared scalar profile.  With $c_1=c_2=1$ and
+Eq.~\eqref{eq:lin-defect-profile}, it does reproduce the phenomenological
+$\alpha_i\mapsto\alpha_i+\widetilde\alpha\chi_D$ defect used by
+Ref.~\cite{Lin2016}.  It does not represent a microscopic or multiorbital
+impurity potential, nor does it encode impurity-induced interband scattering.
+The new quartic and mixed-gradient coefficients are independent
+phenomenological inputs unless a consistent microscopic mapping is supplied.
+
+Near $T_c$, the two stored fields do not imply two independent GL coherence
+lengths.  The relaxation coefficients remain phenomenological, and the local
+screening equation is a dissipative equilibrium-finding dynamics rather than
+a material-specific electrodynamic model.  Scalar terminal order-parameter
+values remain unsupported because their two-component mapping is unspecified.
 
 \begin{thebibliography}{99}
 
@@ -533,6 +859,12 @@ and F.~M. Peeters,
 mixed ($d+s$)-wave superconductors,''
 \textit{Journal of Mathematical Physics} \textbf{55}, 041501 (2014).
 \href{https://doi.org/10.1063/1.4870874}{doi:10.1063/1.4870874}.
+
+\bibitem{Li1999}
+Q.~Li, Z.~D. Wang, and Q.-H. Wang,
+``Vortex dynamics of a $d+is$-wave superconductor,''
+arXiv:cond-mat/9906211 (1999).
+\href{https://doi.org/10.48550/arXiv.cond-mat/9906211}{doi:10.48550/arXiv.cond-mat/9906211}.
 
 \bibitem{Zhu1999}
 J.-X. Zhu, W.~Kim, C.~S. Ting, and C.-R. Hu,
@@ -566,6 +898,13 @@ V.~G. Kogan and J.~Schmalian,
 ``Ginzburg--Landau theory of two-band superconductors,''
 \textit{Physical Review B} \textbf{83}, 054515 (2011).
 \href{https://doi.org/10.1103/PhysRevB.83.054515}{doi:10.1103/PhysRevB.83.054515}.
+
+\bibitem{Lin2016}
+S.-Z. Lin, S.~Maiti, and A.~Chubukov,
+``Distinguishing between $s+id$ and $s+is$ pairing symmetries in multiband
+superconductors through spontaneous magnetization pattern induced by a defect,''
+\textit{Physical Review B} \textbf{94}, 064519 (2016).
+\href{https://doi.org/10.1103/PhysRevB.94.064519}{doi:10.1103/PhysRevB.94.064519}.
 
 \end{thebibliography}
 

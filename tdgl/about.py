@@ -1,16 +1,15 @@
+import importlib.metadata
 import inspect
 import os
 import sys
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
-import IPython
 import joblib
 import matplotlib
 import numba
 import numpy
 import scipy
-from IPython.display import HTML
 
 try:
     import cupy  # type: ignore
@@ -20,6 +19,8 @@ except ImportError:
     cupy_version = None
 
 import tdgl
+
+from ._html import make_html
 
 
 def _blas_info() -> str:
@@ -54,6 +55,10 @@ def _blas_info() -> str:
 def version_dict() -> Dict[str, str]:
     """Returns a dictionary containing the versions of important dependencies."""
     cpu_count = [joblib.cpu_count(only_physical_cores=b) for b in (True, False)]
+    try:
+        ipython_version = importlib.metadata.version("ipython")
+    except importlib.metadata.PackageNotFoundError:
+        ipython_version = "not installed"
     version = tdgl.__version__
     if tdgl.__git_revision__ is not None:
         version = version + f"; git revision {tdgl.__git_revision__}"
@@ -64,7 +69,7 @@ def version_dict() -> Dict[str, str]:
         "matplotlib": matplotlib.__version__,
         "cupy": str(cupy_version),
         "numba": numba.__version__,
-        "IPython": IPython.__version__,
+        "IPython": ipython_version,
         "Python": sys.version,
         "OS": f"{os.name} [{sys.platform}]",
         "Number of CPUs": f"Physical: {cpu_count[0]}, Logical: {cpu_count[1]}",
@@ -74,7 +79,7 @@ def version_dict() -> Dict[str, str]:
 
 def version_table(
     version_info: Optional[Dict[str, str]] = None, verbose: bool = False
-) -> HTML:
+) -> Any:
     """Returns an HTML table with the versions of important depedencies."""
 
     # Adapted from: https://github.com/qutip/qutip/blob/
@@ -100,4 +105,4 @@ def version_table(
     )
     html.append("</table>")
 
-    return HTML("".join(html))
+    return make_html("".join(html))

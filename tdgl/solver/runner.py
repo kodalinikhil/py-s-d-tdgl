@@ -301,6 +301,16 @@ class Runner:
         success = True
         # Thermalize if enabled
         if self.options.skip_time:
+            # Thermalization is followed by a reset of the public simulation
+            # clock. Preserve externally prescribed state variables at t=0 so
+            # the first saved simulation frame is aligned with that clock.
+            prescribed_initial_values = {}
+            for name in ("applied_vector_potential", "epsilon"):
+                if name in self.names:
+                    value = self.values[self.names.index(name)]
+                    prescribed_initial_values[name] = (
+                        value.copy() if hasattr(value, "copy") else value
+                    )
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=TqdmWarning)
                 success = self._run_stage(
@@ -310,6 +320,8 @@ class Runner:
                     save=False,
                 )
             self.running_state.clear()
+            for name, value in prescribed_initial_values.items():
+                self.values[self.names.index(name)] = value
         if not success:
             return False
         self.time = 0
@@ -359,6 +371,42 @@ class Runner:
         it = itertools.count()
 
         last_saved_step = None
+        equilibrium_enabled = (
+            name == "Simulating" and self.options.equilibrium_tolerance is not None
+        )
+        equilibrium_steps = 0
+        equilibrium_reference = None
+        equilibrium_A_index = None
+        equilibrium_A_reference = None
+        psi_indices = None
+        if equilibrium_enabled:
+            try:
+                psi_indices = (self.names.index("psi1"), self.names.index("psi2"))
+            except ValueError as exc:
+                raise ValueError(
+                    "Equilibrium stopping requires state variables named "
+                    "'psi1' and 'psi2'."
+                ) from exc
+            equilibrium_reference = tuple(
+                _get(self.values[index]).copy() for index in psi_indices
+            )
+            if "induced_vector_potential" in self.names:
+                equilibrium_A_index = self.names.index("induced_vector_potential")
+                equilibrium_A_reference = _get(self.values[equilibrium_A_index]).copy()
+            self.state.update(
+                equilibrium_reached=False,
+                equilibrium_error=np.inf,
+                equilibrium_order_parameter_error=np.inf,
+                equilibrium_electromagnetic_error=(
+                    np.inf if equilibrium_A_index is not None else 0.0
+                ),
+                equilibrium_raw_error=np.inf,
+                equilibrium_phase_shift=np.nan,
+                equilibrium_steps=0,
+                equilibrium_checks=0,
+                equilibrium_reference_step=0,
+                equilibrium_time=np.nan,
+            )
 
         def save_step(step):
             nonlocal last_saved_step
@@ -441,6 +489,73 @@ class Runner:
                     self.dt = new_dt
                     self.running_state.step += 1
                     self.time += used_dt
+                    if equilibrium_enabled:
+                        equilibrium_steps += 1
+                        self.state["equilibrium_steps"] = equilibrium_steps
+                        if equilibrium_steps == self.options.equilibrium_window:
+                            current = tuple(
+                                _get(self.values[index]) for index in psi_indices
+                            )
+                            equilibrium_raw_error = max(
+                                float(np.max(np.abs(now - before)))
+                                for now, before in zip(current, equilibrium_reference)
+                            )
+                            overlap = sum(
+                                np.vdot(before, now)
+                                for now, before in zip(current, equilibrium_reference)
+                            )
+                            phase_shift = float(np.angle(overlap))
+                            phase_alignment = np.exp(-1j * phase_shift)
+                            equilibrium_error = max(
+                                float(np.max(np.abs(phase_alignment * now - before)))
+                                for now, before in zip(current, equilibrium_reference)
+                            )
+                            order_parameter_error = equilibrium_error
+                            electromagnetic_error = 0.0
+                            current_A = None
+                            if equilibrium_A_index is not None:
+                                current_A = _get(self.values[equilibrium_A_index])
+                                electromagnetic_error = float(
+                                    np.max(np.abs(current_A - equilibrium_A_reference))
+                                )
+                                equilibrium_error = max(
+                                    equilibrium_error, electromagnetic_error
+                                )
+                            self.state["equilibrium_error"] = equilibrium_error
+                            self.state["equilibrium_order_parameter_error"] = (
+                                order_parameter_error
+                            )
+                            self.state["equilibrium_electromagnetic_error"] = (
+                                electromagnetic_error
+                            )
+                            self.state["equilibrium_raw_error"] = equilibrium_raw_error
+                            self.state["equilibrium_phase_shift"] = phase_shift
+                            self.state["equilibrium_checks"] += 1
+                            if (
+                                self.time >= self.options.equilibrium_min_time
+                                and equilibrium_error
+                                <= self.options.equilibrium_tolerance
+                            ):
+                                self.state["step"] = i + 1
+                                self.state["time"] = self.time
+                                self.state["dt"] = used_dt
+                                self.state["equilibrium_reached"] = True
+                                self.state["equilibrium_time"] = self.time
+                                self.logger.info(
+                                    f"{name}: Equilibrium reached at time "
+                                    f"{self.time:.6g}; maximum gauge-aligned state "
+                                    f"change over {equilibrium_steps} steps was "
+                                    f"{equilibrium_error:.3e}."
+                                )
+                                break
+                            equilibrium_reference = tuple(
+                                value.copy() for value in current
+                            )
+                            if current_A is not None:
+                                equilibrium_A_reference = current_A.copy()
+                            equilibrium_steps = 0
+                            self.state["equilibrium_steps"] = 0
+                            self.state["equilibrium_reference_step"] = i + 1
                     if self.time >= end_time:
                         self.state["step"] = i + 1
                         self.state["time"] = self.time

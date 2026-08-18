@@ -17,7 +17,9 @@ class Layer:
         thickness: The superconducting film thickness, :math:`d`.
         model: The time-dependent Ginzburg-Landau model to use.
         conductivity: The normal state conductivity of the layer, :math:`\\sigma`.
-        u: The ratio of relaxation times for the order parameter, :math:`u`.
+        u: The single-band KWT order-parameter relaxation ratio, :math:`u`.
+            It is used only by ``SingleBandModel``; multicomponent models carry
+            their kinetic coefficients in their model parameters.
         gamma: Backwards-compatible shortcut for ``SingleBandModel(gamma=...)``.
             It is ignored, with a warning, for multi-component models.
         z0: The vertical position of the layer.
@@ -92,7 +94,10 @@ class Layer:
             h5_group.attrs["conductivity"] = self.conductivity
         model_group = h5_group.create_group("model")
         model_group.attrs["type"] = self.model.__class__.__name__
-        model_group.attrs["schema_version"] = 2
+        # Schema 3 adds the s+is quartic, mixed-gradient, disorder, and
+        # electromagnetic coefficients. Older schemas load missing fields from
+        # their dataclass defaults below.
+        model_group.attrs["schema_version"] = 3
         for field in dataclasses.fields(self.model):
             model_group.attrs[field.name] = getattr(self.model, field.name)
 
