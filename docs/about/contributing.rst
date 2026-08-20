@@ -9,7 +9,7 @@ Contributions are welcome, and they are greatly appreciated!
 Code of Conduct
 ===============
 
-Everyone interacting in the ``pyTDGL`` project's code base,
+Everyone interacting in the ``py-s-d-TDGL`` project's code base,
 issue tracker, and any communication channels is expected to follow the
 `PyPA Code of Conduct <https://www.pypa.io/en/latest/code-of-conduct/>`_.
 
@@ -17,7 +17,7 @@ issue tracker, and any communication channels is expected to follow the
 Reporting Bugs
 ==============
 
-Report bugs `by creating an issue <https://docs.github.com/en/github/managing-your-work-on-github/creating-an-issue>`_.
+Report bugs by `creating an issue <https://github.com/kodalinikhil/py-s-d-tdgl/issues>`_.
 
 When reporting a bug, please include:
 
@@ -29,7 +29,8 @@ When reporting a bug, please include:
 Submitting Feedback
 ===================
 
-The best way to send feedback is to `create an issue <https://docs.github.com/en/github/managing-your-work-on-github/creating-an-issue>`_.
+The best way to send feedback is to
+`create an issue <https://github.com/kodalinikhil/py-s-d-tdgl/issues>`_.
 
 If you are proposing a feature:
 
@@ -42,7 +43,7 @@ If you are proposing a feature:
 Pull Request Guidelines
 =======================
 
-Pull requests are the best way to propose changes to the ``pyTDGL`` codebase, and we actively welcome them.
+Pull requests are the best way to propose changes to the ``py-s-d-TDGL`` codebase, and we actively welcome them.
 All pull requests should abide by the following guidelines:
 
 1. All code must be compatible with `Black code style <https://black.readthedocs.io/en/stable/>`_ (a subset of `PEP 8 <https://www.python.org/dev/peps/pep-0008/>`_). We recommend using `Black <https://black.readthedocs.io/en/stable/>`_ and `flake8 <https://flake8.pycqa.org/en/latest/>`_ locally to ensure compatibility.

@@ -3,12 +3,15 @@
 # For the full list of built-in configuration values, see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
+import os
+
+
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
-project = "pyTDGL"
-copyright = "2022-2023, Logan Bishop-Van Horn"
-author = "Logan Bishop-Van Horn"
+project = "py-s-d-TDGL"
+copyright = "2026, Nikhil Kodali; based on pyTDGL"
+author = "Nikhil Kodali and pyTDGL contributors"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -38,6 +41,7 @@ bibtex_bibfiles = [
 
 # Make sure the target is unique
 autosectionlabel_prefix_document = True
+autosectionlabel_maxdepth = 1
 
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
@@ -75,8 +79,11 @@ math_eqref_format = "Eq. {number}"
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
-    "numpy": ("http://docs.scipy.org/doc/numpy", None),
-    "scipy": ("http://docs.scipy.org/doc/scipy/reference", None),
-    "matplotlib": ("http://matplotlib.org/stable", None),
+    "numpy": ("https://numpy.org/doc/stable", None),
+    "scipy": ("https://docs.scipy.org/doc/scipy", None),
+    "matplotlib": ("https://matplotlib.org/stable", None),
     "shapely": ("https://shapely.readthedocs.io/en/stable/", None),
 }
+
+if os.environ.get("SPHINX_OFFLINE"):
+    intersphinx_mapping = {}

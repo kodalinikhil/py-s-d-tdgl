@@ -1,15 +1,20 @@
-.. py-tdgl
-
 .. _api-solve:
 
 ******
 Solver
 ******
 
-Simulating the dynamics of a :class:`tdgl.Device` for a given applied magnetic vector potential
-and set of bias currents is as simple as calling the :func:`tdgl.solve` function. The solver
-implements the finite-volume and implicit Euler methods described in detail in `Theoretical Background <../background.rst>`_.
-The behavior of the solver is determined an instance of :class:`tdgl.SolverOptions`.
+Simulating a finite :class:`tdgl.Device` for a given applied vector potential
+and set of bias currents is done with :func:`tdgl.solve`. The selected
+``device.layer.model`` determines whether one or two condensates are evolved.
+The solver uses the unstructured finite-volume operators described in
+:doc:`../background`; model-specific equations are summarized in
+:doc:`../models`. Its behavior is controlled by :class:`tdgl.SolverOptions`.
+
+For rectangular magnetic-periodic cells, use
+:func:`tdgl.solve_magnetic_periodic` instead. It shares
+:class:`tdgl.SolverOptions` where meaningful but has no terminals or physical
+boundary; see :doc:`magnetic-periodic`.
 
 The applied vector potential can be specified as a scalar (indicating the vector potential associated with a uniform magnetic field),
 a function with signature ``func(x, y, z) -> [Ax, Ay, Az]``, or a :class:`tdgl.Parameter`. The physical units for the
@@ -32,5 +37,3 @@ in the dictionary to ensure current conservation.
 .. autoenum:: tdgl.solver.options.SparseSolver
 
 .. autoclass:: tdgl.Parameter
-
-

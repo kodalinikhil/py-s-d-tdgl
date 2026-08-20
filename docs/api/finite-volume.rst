@@ -1,5 +1,3 @@
-.. py-tdgl
-
 .. _api-finite-volume:
 
 

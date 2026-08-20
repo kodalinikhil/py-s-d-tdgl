@@ -1,3 +1,4 @@
+import argparse
 import glob
 import sys
 from pathlib import Path
@@ -29,11 +30,10 @@ def expected_sweep():
     return goncalves_field_sweep()
 
 
-def result_files():
-    """Return one deterministic output file per expected 0.25 sweep step."""
-    sweep = expected_sweep()
+def result_files(result_directory=RESULT_DIRECTORY, sweep=None):
+    """Return the newest deterministic output file for each sweep step."""
     by_step = {}
-    for filename in glob.glob(str(RESULT_DIRECTORY / "goncalves_Ha_*.h5")):
+    for filename in glob.glob(str(result_directory / "goncalves_Ha_*.h5")):
         stem = Path(filename).stem
         parts = stem.split("_")
         try:
@@ -42,7 +42,9 @@ def result_files():
         except (IndexError, ValueError):
             print(f"Skipping unrecognized output filename: {filename}")
             continue
-        if step >= len(sweep) or not np.isclose(reduced_field, sweep[step]):
+        if sweep is not None and (
+            step >= len(sweep) or not np.isclose(reduced_field, sweep[step])
+        ):
             print(f"Skipping file outside the configured field sweep: {filename}")
             continue
         candidate = (Path(filename).stat().st_mtime, reduced_field, filename)
@@ -64,28 +66,68 @@ def plot_branches(ax, fields, values, peak_index, **kwargs):
         label="Sweep up",
         **kwargs,
     )
-    ax.plot(
-        fields[peak_index:],
-        values[peak_index:],
-        "s--",
-        color="red",
-        label="Sweep down",
-        **kwargs,
-    )
+    if peak_index < len(fields) - 1:
+        ax.plot(
+            fields[peak_index:],
+            values[peak_index:],
+            "s--",
+            color="red",
+            label="Sweep down",
+            **kwargs,
+        )
     ax.legend()
     ax.grid(True)
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Plot field-dependent observables from Goncalves checkpoints."
+    )
+    parser.add_argument(
+        "--result-directory",
+        type=Path,
+        default=RESULT_DIRECTORY,
+        help="Directory containing goncalves_Ha_*.h5 checkpoints.",
+    )
+    parser.add_argument(
+        "--infer-sweep",
+        action="store_true",
+        help="Infer the field protocol from checkpoint filenames.",
+    )
+    parser.add_argument(
+        "--output-file",
+        type=Path,
+        help="Output PNG path (default: RESULT_DIRECTORY/goncalves_h_dependence.png).",
+    )
+    parser.add_argument(
+        "--title",
+        default="Gonçalves field sweep (transition-refined continuation)",
+        help="Figure title.",
+    )
+    parser.add_argument(
+        "--skip-spatial",
+        action="store_true",
+        help="Do not create a spatial plot of the last readable state.",
+    )
+    return parser.parse_args()
+
+
 def main():
-    files = result_files()
+    args = parse_args()
+    result_directory = args.result_directory.resolve()
+    sweep = None if args.infer_sweep else expected_sweep()
+    files = result_files(result_directory, sweep)
     if not files:
         print("No data files found to plot!")
         return
 
-    print(
-        f"Plotting {len(files)}/{len(expected_sweep())} points from the "
-        "configured Hc2 sweep."
-    )
+    if sweep is None:
+        print(f"Plotting {len(files)} available checkpoint steps.")
+    else:
+        print(
+            f"Plotting {len(files)}/{len(sweep)} points from the "
+            "configured Hc2 sweep."
+        )
 
     reduced_fields = []
     avg_psi_d = []
@@ -217,23 +259,26 @@ def main():
     axs[5].set_ylabel(r"$F$")
     axs[5].set_title("Stationary Gibbs free energy (Eq. 79)")
 
-    fig.suptitle(
-        r"Gonçalves field sweep (transition-refined continuation)",
-        fontsize=15,
-    )
+    fig.suptitle(args.title, fontsize=15)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    RESULT_DIRECTORY.mkdir(parents=True, exist_ok=True)
-    output_file = RESULT_DIRECTORY / "goncalves_h_dependence.png"
+    result_directory.mkdir(parents=True, exist_ok=True)
+    output_file = (
+        args.output_file.resolve()
+        if args.output_file is not None
+        else result_directory / "goncalves_h_dependence.png"
+    )
+    output_file.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_file, dpi=300)
     plt.close(fig)
     print(f"Plot saved to '{output_file}'.")
 
-    plot_spatial_state(
-        spatial_solution,
-        spatial_field,
-        RESULT_DIRECTORY / "goncalves_trapped_flux.png",
-        title_prefix="Last readable return-leg state",
-    )
+    if not args.skip_spatial:
+        plot_spatial_state(
+            spatial_solution,
+            spatial_field,
+            result_directory / "goncalves_trapped_flux.png",
+            title_prefix="Last readable state",
+        )
 
 
 if __name__ == "__main__":

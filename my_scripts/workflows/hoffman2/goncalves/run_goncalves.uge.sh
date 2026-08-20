@@ -32,6 +32,13 @@ if [[ ! -x "$ENV_PREFIX/bin/python" ]]; then
     echo "Run setup_goncalves_environment.uge.sh first." >&2
     exit 2
 fi
+if ! "$ENV_PREFIX/bin/python" -c \
+    'import h5py, matplotlib, meshpy, numba, numpy, scipy, shapely, tdgl' \
+    >/dev/null 2>&1; then
+    echo "The Hoffman Python environment is incomplete: $ENV_PREFIX" >&2
+    echo "Resubmit with TDGL_REBUILD_ENV=1." >&2
+    exit 2
+fi
 
 SCRATCH_BASE="${SCRATCH:?SCRATCH is not set}/py-s-d-tdgl/$RUN_ID"
 WORK_OUTPUT="$SCRATCH_BASE/goncalves"

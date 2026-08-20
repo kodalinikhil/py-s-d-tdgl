@@ -16,6 +16,20 @@ REPO_DIR="${TDGL_REPO_DIR:-${SGE_O_WORKDIR:-$(pwd)}}"
 ENV_PREFIX="${TDGL_ENV_PREFIX:-$HOME/.conda/envs/py-s-d-tdgl}"
 REBUILD_ENV="${TDGL_REBUILD_ENV:-0}"
 INSTALL_REQUIRED=0
+RUNTIME_PACKAGES=(
+    cloudpickle
+    h5py
+    ipython
+    joblib
+    matplotlib
+    meshpy
+    numba
+    numpy
+    pint
+    scipy
+    shapely
+    tqdm
+)
 
 if [[ ! -x "$ENV_PREFIX/bin/python" ]]; then
     mamba create -y -p "$ENV_PREFIX" python=3.12 pip
@@ -28,9 +42,16 @@ if ! "$ENV_PREFIX/bin/python" -c \
 fi
 
 if [[ "$REBUILD_ENV" == "1" ]] || [[ "$INSTALL_REQUIRED" == "1" ]]; then
-    "$ENV_PREFIX/bin/python" -m pip install -e "$REPO_DIR"
+    # Hoffman2's production nodes use an older system compiler and libc. Use
+    # conda-forge binaries for the compiled scientific stack so pip does not
+    # fall back to building NumPy or h5py from source.
+    mamba install -y -p "$ENV_PREFIX" "${RUNTIME_PACKAGES[@]}"
+    "$ENV_PREFIX/bin/python" -m pip install --no-deps -e "$REPO_DIR"
 else
     echo "Reusing $ENV_PREFIX (set TDGL_REBUILD_ENV=1 to reinstall)."
 fi
+
+"$ENV_PREFIX/bin/python" -c \
+    'import h5py, matplotlib, meshpy, numba, numpy, scipy, shapely, tdgl'
 
 echo "Environment ready: $ENV_PREFIX"

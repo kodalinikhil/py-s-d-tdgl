@@ -7,7 +7,8 @@ Magnetic-periodic rectangular cells
 The magnetic-periodic solver is a standalone structured-grid backend for a
 rectangular vortex-lattice unit cell. It is intended for calculations with a
 fixed integer number of flux quanta and is not an alternate boundary switch on
-the legacy arbitrary-mesh solver.
+the finite-device arbitrary-mesh solver. The class and function reference is
+in :doc:`api/magnetic-periodic`.
 
 The public cell lengths are physical values in ``length_units``. In the
 equations below, :math:`L_x`, :math:`L_y`, and the grid spacings have already
@@ -18,12 +19,12 @@ The two backends represent different physical domains:
 
 * ``MagneticPeriodicSolver`` evolves a rectangular torus. Opposite sides are
   identified by magnetic translations, and there is no physical perimeter.
-* The legacy solver evolves a finite film on an arbitrary triangular mesh. It
+* The finite-device solver evolves a finite film on an arbitrary triangular mesh. It
   retains variational order-parameter conditions on the sample boundary and,
   for local electromagnetic screening, imposes :math:`B=H` at that boundary.
 
 The periodic backend does not add seam edges to, or otherwise modify, the
-legacy open-mesh operators.
+finite-device open-mesh operators.
 
 Basic use
 =========
@@ -102,7 +103,7 @@ single band, ``psi_s`` and ``psi_d`` for s+d, ``psi_d`` and
 files use schema 2: each frame stores arrays as ``psi1`` and, when present,
 ``psi2``, together with a ``component_names`` attribute.  This keeps the file
 layout model-neutral while retaining the physical names needed to interpret
-it.  The reader still accepts legacy schema-1 s+d files whose datasets are
+it.  The reader still accepts schema-1 s+d files whose datasets are
 named ``psi_s`` and ``psi_d``.
 
 Field modes
@@ -125,7 +126,7 @@ is available for ``SPlusDModel`` and ``SPlusSModel``; s+s screening requires
 energy.  A homogeneous periodic drive is likewise available only for these
 two models with screening enabled.  The backend is CPU-only, uses SuperLU,
 supports static disorder, and has no terminals, physical sample edge, or
-legacy live monitor.
+finite-device live monitor.
 
 Minimal fixed-field d+d' example
 ================================

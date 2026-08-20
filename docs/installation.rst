@@ -4,7 +4,7 @@ Installation
 
 .. image:: images/logo-transparent-large.png
   :width: 300
-  :alt: pyTDGL logo.
+  :alt: py-s-d-TDGL logo.
   :align: center
 
 .. role:: bash(code)
@@ -13,9 +13,11 @@ Installation
 .. role:: python(code)
   :language: python
 
-``pyTDGL`` requires ``python``  ``3.9``, ``3.10``, ``3.11``, ``3.12``, ``3.13``, or ``3.14``. We recommend creating a new
+``py-s-d-TDGL`` requires Python 3.9 through 3.14. We recommend creating a new
 `conda environment <https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html>`_
-for ``pyTDGL`` to avoid dependency conflicts with other packages. To create and activate a ``conda`` environment called
+to avoid dependency conflicts with other packages. This is especially
+important because this fork and upstream pyTDGL both import as ``tdgl`` and
+must not be installed together. To create and activate an environment called
 ``tdgl``, run:
 
 .. code-block:: bash
@@ -23,35 +25,32 @@ for ``pyTDGL`` to avoid dependency conflicts with other packages. To create and 
   conda create --name tdgl python="3.12"
   conda activate tdgl
 
-Install via ``pip``
+Install from GitHub
 -------------------
 
-* From  `PyPI <https://pypi.org/project/tdgl/>`_, the Python Package index:
-    
-    .. code-block:: bash
-    
-      pip install tdgl
+Install the current source directly from the project repository:
 
-* From `GitHub <https://github.com/loganbvh/py-tdgl/>`_:
+.. code-block:: bash
 
-    .. code-block:: bash
-    
-      pip install git+https://github.com/loganbvh/py-tdgl.git
+  python -m pip install git+https://github.com/kodalinikhil/py-s-d-tdgl.git
+
+The distribution is named ``py-s-d-tdgl``; the Python package remains
+``tdgl`` for compatibility with the inherited API.
 
 Editable installation
 =====================
 
-To install an editable version of ``pyTDGL`` for development, run:
+To install an editable version for development, run:
 
 .. code-block:: bash
 
-  git clone https://github.com/loganbvh/py-tdgl.git
-  cd py-tdgl
-  pip install -e ".[dev,docs]"
+  git clone https://github.com/kodalinikhil/py-s-d-tdgl.git
+  cd py-s-d-tdgl
+  python -m pip install -e ".[dev,docs]"
 
 .. seealso::
 
-  :ref:`Contributing to pyTDGL <about/contributing:Contributing>`
+  :ref:`Contributing <about/contributing:Contributing>`
 
 
 Alternative sparse solvers
@@ -80,7 +79,7 @@ Installing UMFPACK
   conda install -c conda-forge suitesparse
 
   pip install swig scikit-umfpack
-  # or pip install tdgl[umfpack]
+  # then install this project as shown above
 
 
 Installing PARDISO
@@ -98,12 +97,15 @@ Installing PARDISO
   # After activating your conda environment for tdgl
   pip install pypardiso
   # or conda install -c conda-forge pypardiso
-  # or pip install tdgl[pardiso]
+  # then install this project as shown above
 
 GPU acceleration
 ----------------
 
-For users with an NVIDIA or AMD GPU, ``tdgl`` can be accelerated using the `CuPy <https://cupy.dev/>`_ library.
+The finite-device backend can accelerate supported array operations using the
+`CuPy <https://cupy.dev/>`_ library on an NVIDIA or AMD GPU. The
+magnetic-periodic backend and local electromagnetic screening for
+multi-component models are currently CPU-only.
 First install the appropriate version of ``cupy`` for your GPU hardware and driver version
 (see installation instructions `here <https://docs.cupy.dev/en/stable/install.html>`_).
 Then set the ``gpu`` attribute of :class:`tdgl.SolverOptions` to ``True``. Setting ``tdgl.SolverOptions.gpu = True``
@@ -152,8 +154,10 @@ performing the sparse linear solve on the CPU.
   For more detailed installation instructions, see the `NVIDIA documentation <https://docs.nvidia.com/cuda/cuda-quick-start-guide/index.html>`_.
 
 Due to overheads related to transferring data between the CPU and GPU, it is expected that ``cupy`` will provide
-a significant speedup only for models with relatively large meshes and/or models that include `screening <notebooks/screening.ipynb>`_.
-Please open a `GitHub issue <https://github.com/loganbvh/py-tdgl/issues>`_ if you have any problems using ``tdgl`` with ``cupy``.
+a significant speedup only for finite-device models with relatively large meshes. Single-band models using
+`thin-film screening <notebooks/screening.ipynb>`_ may also benefit.
+Please open a `GitHub issue <https://github.com/kodalinikhil/py-s-d-tdgl/issues>`_
+if you have problems using ``tdgl`` with ``cupy``.
 
 .. note::
 
@@ -176,4 +180,3 @@ If you prefer, you can instead run the following commands in a Python session:
 
     >>> import tdgl.testing
     >>> tdgl.testing.run()
-

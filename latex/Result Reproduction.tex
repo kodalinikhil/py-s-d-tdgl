@@ -40,15 +40,12 @@
 \section{Goncalves et al., ``Numerical solution of the time dependent Ginzburg-Landau equations for mixed (d + s)-
 wave superconductors"}
 
-\textbf{Note: I believe the behavioral differences below are primarily due to the mesh not being fine enough. The subsection on reproducing Fig. 6 is flawed because of that.}
-
 We reproduce the results in Sec.~VIII using
 $\kappa_D=2$, $\tau_1=8/3$, $\tau_3=16/3$, $\tau_4=2$, $\nu=-2$,
 $\eta_s=2$, and $\eta_v=1$.  The $8\xi_D\times8\xi_D$ film starts from
 $\psi_D=1$, $\psi_S=0$, and $\mathbf B=0$.  The paper sweeps gradually to
-$2.5H_{c2}$ and back to zero.  We use $0.25H_{c2}$ steps plus
-$H/H_{c2}=1.040$, $1.125$, and $1.260$, so barrier crossings may occur at
-different fields.
+$2.5H_{c2}$. We use $0.1H_{c2}$ steps, which seems to have led to a different path along the branches. 
+different fields. The run is not yet complete.
 
 \begin{figure}[H]
     \centering
@@ -58,69 +55,24 @@ different fields.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=\linewidth]{images/goncalves_h_dependence.png}
-    \caption{Our transition-refined field continuation.  Blue circles show the
-    increasing-field branch and red squares show the decreasing-field branch.}
-    \label{fig:goncalves-field-dependence}
+    \includegraphics[width=\linewidth]{images/goncalves_fine_mesh_h_dependence.png}
+    \caption{Field dependence for the finer-mesh attempt.}
+    \label{fig:goncalves-fine-mesh-field-dependence}
 \end{figure}
-
-\subsection{Attempts to reproduce Fig.~6}
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.85\textwidth]{images/goncalves_fig6.png}
-    \caption{Goncalves \textit{et al.}: six vortices at $H/H_{c2}=1.040$
-    (left) and $1.125$ (right).}
-    \label{fig:goncalves-fig6}
+    \includegraphics[width=\linewidth]{images/goncalves_fine_mesh_psi_d_all_states.png}
+    \caption{$|\psi_d|$ for all states in the finer-mesh attempt.}
+    \label{fig:goncalves-fine-mesh-psi-d}
 \end{figure}
-
-We tested three field histories.  The \emph{up sweep}, seeded from the next
-lower field, gives five vortices at $H/H_{c2}=1.040$ and six at $1.125$
-(Fig.~\ref{fig:goncalves-up}).  Only the latter count agrees with the paper.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=\linewidth]{images/goncalves_sweep_up_d_wave_H_1.040_1.125.png}
-    \caption{Increasing-field continuation at the two Fig.~6 fields: five
-    vortices at $H/H_{c2}=1.040$ and six at $1.125$.}
-    \label{fig:goncalves-up}
+    \includegraphics[width=0.9\linewidth]{images/goncalves_ourpath.png}
+    \caption{Our finer-mesh path overlaid on Goncalves et al. Fig.~2.}
+    \label{fig:goncalves-fine-mesh-our-path}
 \end{figure}
-
-The \emph{down sweep}, seeded from the next higher field after reaching
-$2.5H_{c2}$, retains seven vortices at $H/H_{c2}=1.040$ and eight at $1.125$
-(Fig.~\ref{fig:goncalves-down}).
-
-\begin{figure}[H]
-    \centering
-    \begin{minipage}[c]{0.49\textwidth}
-        \centering
-        \includegraphics[width=\linewidth]{images/goncalves_sweep_down_d_wave_H_1.040.png}
-    \end{minipage}\hfill
-    \begin{minipage}[c]{0.49\textwidth}
-        \centering
-        \includegraphics[width=\linewidth]{images/goncalves_sweep_down_d_wave_H_1.125.png}
-    \end{minipage}
-    \caption{Decreasing-field continuation at the two Fig.~6 fields: seven
-    vortices at $H/H_{c2}=1.040$ and eight at $1.125$.}
-    \label{fig:goncalves-down}
-\end{figure}
-
-The \emph{straight jump} solves each target directly from the zero-field
-state.  It also gives seven and eight vortices, matching the down sweep rather
-than the up sweep.
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.9\linewidth]{images/goncalves_d_wave_H_1.040_1.125.png}
-    \caption{Straight jumps to $H/H_{c2}=1.040$ and $1.125$, yielding seven
-    and eight vortices as on the down sweep.}
-    \label{fig:goncalves-jump}
-\end{figure}
-
-The straight jump suppresses the boundary condensate, admitting vortices
-before the edge barrier reforms.  It thus reaches the high-vorticity
-metastable basin retained on the down sweep, while small up-sweep steps remain
-in a lower-vorticity basin.  This match does not establish a unique equilibrium.
 
 \clearpage
 \section{Xu, Ren, Ting, ``Structures of single vortex and vortex lattice in a d-wave superconductor"}
@@ -155,8 +107,8 @@ The single-vortex magnitude and magnetic-field profiles reported by Xu, Ren, and
     \label{fig:xurenting-field-phases}
 \end{figure}
 
-For comparison, we use the defect-free $H/H_{c2}=0.5$ state from the
-decreasing-field branch of the Goncalves sweep.  This state was continued down
+For comparison, we use a $H/H_{c2}=0.5$ state from one of our attempts at 
+reproducing the Goncalves paper.  This state was continued down
 from $2.5H_{c2}$ and contains one vortex.  The level curves show the
 order-parameter magnitudes and magnetic fields, while the arrows show the
 phases of $\psi_d$ and $\psi_s$.

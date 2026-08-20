@@ -1,5 +1,3 @@
-.. py-tdgl
-
 .. _api-visualization:
 
 
@@ -55,4 +53,3 @@ Plotting utilities
 .. autofunction:: tdgl.visualization.auto_grid
 
 .. autofunction:: tdgl.non_gui_backend
-

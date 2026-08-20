@@ -6,12 +6,12 @@ Theoretical Background
 
 .. image:: images/logo-transparent-large.png
   :width: 300
-  :alt: pyTDGL logo.
+  :alt: py-s-d-TDGL logo.
   :align: center
 
 .. tip::
 
-   ``pyTDGL`` is described in detail in the following paper:
+   The inherited single-band finite-device implementation is described in:
 
      pyTDGL: Time-dependent Ginzburg-Landau in Python,
      Computer Physics Communications **291**, 108799 (2023),
@@ -19,12 +19,17 @@ Theoretical Background
 
    The accepted version of the paper can also be found on arXiv: `arXiv:2302.03812 <https://doi.org/10.48550/arXiv.2302.03812>`_.
 
-Here we sketch out the generalized time-dependent Ginzburg-Landau model implemented in ``pyTDGL``, and the numerical methods used to solve it.
-This material and portions of the ``pyTDGL`` package are based on Refs. :footcite:p:`Jonsson2022-xe, Jonsson2022-mb` (`repo <https://github.com/afsa/super-detector-py>`_). The generalized
+This chapter documents the single-band Kramer--Watts--Tobin formulation and
+the unstructured finite-volume methods inherited from pyTDGL. The extended
+s+d, d+d', and s+s/s+is free energies and component conventions are described
+separately in :doc:`models`; the structured periodic discretization is
+described in :doc:`magnetic_periodic`.
+
+This material and portions of the framework are based on Refs. :footcite:p:`Jonsson2022-xe, Jonsson2022-mb` (`repo <https://github.com/afsa/super-detector-py>`_). The generalized
 time-dependent Ginzburg-Landau theory is based on Refs. :footcite:p:`Kramer1978-kb, Watts-Tobin1981-mn`. The numerical methods are based on
 Refs. :footcite:p:`Jonsson2022-xe, Gropp1996-uw, Du1998-kt`.
 
-``pyTDGL`` can model superconducting thin films of arbitrary geometry, including multiply-connected films (i.e., films with holes).
+The finite-device backend can model superconducting thin films of arbitrary geometry, including multiply-connected films (i.e., films with holes).
 By "thin" or "two-dimensional" we mean that the film thickness :math:`d` is smaller than the coherence length :math:`\xi=\xi(T)`
 and the London penetration depth :math:`\lambda=\lambda(T)`, where :math:`T` is temperature. This assumption implies that both the
 superconducting order parameter :math:`\psi(\mathbf{r})` and the supercurrent :math:`\mathbf{J}_s(\mathbf{r})` are roughly
@@ -33,13 +38,13 @@ Strictly speaking, the model is only valid for temperatures very close to the cr
 temperature, :math:`T/T_c\approx 1`, and for dirty superconductors where the inelastic diffusion length much smaller than the
 coherence length :math:`\xi` :footcite:p:`Kramer1978-kb`.
 
-Time-dependent Ginzburg-Landau
-------------------------------
+Single-band time-dependent Ginzburg--Landau
+--------------------------------------------
 
 The time-dependent Ginzburg-Landau formalism employed here :footcite:p:`Kramer1978-kb` boils down to a set of coupled partial differential equations for a
 complex-valued field :math:`\psi(\mathbf{r}, t)=|\psi|e^{i\theta}` (the superconducting order parameter)
 and a real-valued field :math:`\mu(\mathbf{r}, t)` (the electric scalar potential), which evolve deterministically in time for a given
-time-independent applied magnetic vector potential :math:`\mathbf{A}(\mathbf{r})`.
+applied magnetic vector potential :math:`\mathbf{A}(\mathbf{r}, t)`.
 
 The order parameter :math:`\psi` evolves according to:
 
@@ -238,8 +243,8 @@ The discretized form of the covariant time-derivative of :math:`\psi` at time :m
 
 where :math:`U_i^{n, n+1}=\exp(i\mu_i^{n}\Delta t^{n})` is the temporal link variable.
 
-Implicit Euler method
-=====================
+Derivation of the implicit Euler update
+=======================================
 
 The discretized form of the equations of motion for :math:`\psi(\mathbf{r}, t)` and :math:`\mu(\mathbf{r}, t)` are given by
 
@@ -359,7 +364,7 @@ Combining :eq:`psi-sol` and :eq:`poisson-num` yields a sparse linear system that
 Adaptive time step
 ==================
 
-``pyTDGL`` implements an adaptive time step algorithm that adjusts the time step :math:`\Delta t^{n}`
+The solver implements an adaptive time step algorithm that adjusts the time step :math:`\Delta t^{n}`
 based on the speed of the system's dynamics. This functionality is useful if, for example, you are only interested
 in the equilibrium behavior of a system. The dynamics may initially be quite fast and then slow down as you approach steady state.
 Using an adaptive time step dramatically reduces the wall-clock time needed to model equilibrium behavior in such instances, without
@@ -428,12 +433,16 @@ Here we go through the full derivation of the quadratic equation for :math:`\lef
         
     \end{split}
 
-Screening
-=========
+Single-band thin-film screening
+===============================
 
-By default ``pyTDGL`` assumes that screening is negligible, i.e., that the total vector potential in the film is 
-equal to the applied vector potential: :math:`\mathbf{A}(\mathbf{r}, t)=\mathbf{A}_\mathrm{applied}(\mathbf{r})`.
-Screening can optionally be included by evaluating the vector potential induced by currents flowing in the film.
+For :class:`tdgl.SingleBandModel`, the default assumes that screening is negligible, i.e., that the total vector potential in the film is
+equal to the applied vector potential:
+:math:`\mathbf{A}(\mathbf{r}, t)=\mathbf{A}_\mathrm{applied}(\mathbf{r}, t)`.
+Screening can optionally be included by evaluating the vector potential induced by currents flowing in the film. The multi-component
+models instead use the local bulk electromagnetic equations summarized in
+:doc:`framework`; the Biot--Savart iteration below does not describe those
+paths.
 The vector potential in a 2D film induced by a sheet current density :math:`\mathbf{K}` flowing in the film is given by
 
 .. math::
@@ -478,8 +487,8 @@ in contrast to the sparse finite volume calculation, it is a "dense" problem. Th
 including screening significantly increases the number of floating point operations required for a
 TDGL simulation.
 
-Pseduocode for the solver algorithms
-====================================
+Pseudocode for the single-band solver
+=====================================
 
 Adaptive Euler update
 *********************
@@ -488,6 +497,7 @@ Adaptive Euler update subroutine. The parameters :math:`M_\mathrm{adaptive}` and
 
     | **Data**: :math:`\psi_i^n`, :math:`\Delta t_\star`, :math:`M_\mathrm{adaptive}`, :math:`N_\mathrm{retries}^\mathrm{max}`
     | **Result**: :math:`\psi_i^{n+1}`, :math:`\Delta t^n`
+
     - :math:`\Delta t^n \gets \Delta t_\star`
     - Calculate :math:`z_i^n`, :math:`w_i^n`, :math:`\left|\psi_i^{n+1}\right|^2` given :math:`\Delta t^n` (:eq:`z`, :eq:`w`, :eq:`quad-root`)
     - if *adaptive*:
@@ -528,11 +538,12 @@ given the state of the system at time :math:`t^n`, with no screening.
 Solve step, with screening
 **************************
 
-    A single solve step, with screening. The parameters :math:`A_\mathrm{tol}` and :math:`N_\mathrm{screening}^\mathrm{max}` can be set by the user.
+A single solve step with screening. The parameters :math:`A_\mathrm{tol}` and
+:math:`N_\mathrm{screening}^\mathrm{max}` can be set by the user.
 
     | **Data**: :math:`n`, :math:`t^n`, :math:`\Delta t_\star`, :math:`\psi_i^{n}`, :math:`\mu_i^{n}`, :math:`\mathbf{A}^n_{\mathrm{induced}}`
     | **Result**: :math:`t^{n+1}`, :math:`\Delta t^{n}`, :math:`\psi_i^{n+1}`, :math:`\mu_i^{n+1}`, :math:`J_{s,ij}^{n+1}`, :math:`J_{n,ij}^{n+1}`, :math:`\mathbf{A}^{n+1}_{\mathrm{induced}}`, :math:`\Delta t_\star`
-    
+
     - Evaluate current density :math:`J^{n+1}_{\mathrm{ext},\,k}` for terminals :math:`k` (:eq:`bc-current`)
     - Update boundary conditions for :math:`\mu_i^{n+1}` (:eq:`bc-normal`)
     - :math:`s \gets 0`, screening iteration index

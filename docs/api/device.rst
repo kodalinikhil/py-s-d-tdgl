@@ -1,5 +1,3 @@
-.. py-tdgl
-
 .. _api-device:
 
 
@@ -9,10 +7,11 @@ Device Interface
 
 The ``tdgl.device`` subpackage provides the following functionalities:
 
-* Definition of material properties in instances of :class:`tdgl.Layer`.
+* Definition of material properties and the selected single- or
+  multi-component equation set in :class:`tdgl.Layer`.
 * Definition of device geometry in terms of :class:`tdgl.Polygon` instances, which can be created from simple
-  :ref:`geometric primitives <api/device:Geometry>` using `constructive solid geometry <https://en.wikipedia.org/wiki/Constructive_solid_geometry>`_.
-* :ref:`Mesh generation <api/device:Mesh Generation>` for :class:`tdgl.Polygon` and :class:`tdgl.Device` instances.
+  :ref:`geometric primitives <geometry>` using `constructive solid geometry <https://en.wikipedia.org/wiki/Constructive_solid_geometry>`_.
+* :ref:`Mesh generation <mesh-generation>` for :class:`tdgl.Polygon` and :class:`tdgl.Device` instances.
 * Translation between physical units (e.g., microns and microamperes) and the dimensionless units used in TDGL.
 * Visualization and serialization of :class:`tdgl.Device` instances.
 
@@ -22,6 +21,7 @@ Overview
 Here is a quick overview of the most useful functions and methods for creating and working with
 polygons and devices. For a demonstration of how all of these pieces work together in practice,
 see `Working with polygons <../notebooks/polygons.ipynb>`_.
+For model selection and component conventions, see :doc:`../models`.
 
 * Geometric primitives:
     * :func:`tdgl.geometry.box`
@@ -91,6 +91,8 @@ Device
 .. autoclass:: tdgl.Device
     :members:
 
+.. _geometry:
+
 Geometry
 --------
 
@@ -106,6 +108,8 @@ to create complex shapes.
 .. autofunction:: tdgl.geometry.ellipse
 
 .. autofunction:: tdgl.geometry.rotate
+
+.. _mesh-generation:
 
 Mesh Generation
 ---------------

@@ -1,57 +1,50 @@
-.. pyTDGL documentation master file, created by
-   sphinx-quickstart on Thu Sep 29 15:33:39 2022.
-   You can adapt this file completely to your liking, but it should at least
-   contain the root `toctree` directive.
-
-pyTDGL: Time-dependent Ginzburg Landau in Python
-===================================================
+py-s-d-TDGL: single- and multi-component GL simulations
+========================================================
 
 .. image:: images/logo-transparent-large.png
   :width: 300
-  :alt: pyTDGL logo.
+  :alt: py-s-d-TDGL logo.
   :align: center
 
-.. image:: https://img.shields.io/pypi/v/tdgl
-   :alt: PyPI
-
-.. image:: https://img.shields.io/github/actions/workflow/status/loganbvh/py-tdgl/lint-and-test.yml?branch=main
+.. image:: https://img.shields.io/github/actions/workflow/status/kodalinikhil/py-s-d-tdgl/lint-and-test.yml?branch=main
+   :target: https://github.com/kodalinikhil/py-s-d-tdgl/actions
    :alt: GitHub Workflow Status
 
-.. image:: https://readthedocs.org/projects/py-tdgl/badge/?version=latest
-    :target: https://py-tdgl.readthedocs.io/en/latest/?badge=latest
-    :alt: Documentation Status
-
-.. image:: https://codecov.io/gh/loganbvh/py-tdgl/branch/main/graph/badge.svg?token=VXdxJKP6Ag 
- :target: https://codecov.io/gh/loganbvh/py-tdgl
-
-.. image:: https://img.shields.io/github/license/loganbvh/py-tdgl
+.. image:: https://img.shields.io/github/license/kodalinikhil/py-s-d-tdgl
+   :target: https://github.com/kodalinikhil/py-s-d-tdgl/blob/main/LICENSE
    :alt: GitHub
 
 .. image:: https://img.shields.io/badge/code%20style-black-000000.svg
    :target: https://github.com/psf/black
 
-.. image:: https://zenodo.org/badge/535746543.svg
-   :target: https://zenodo.org/badge/latestdoi/535746543
+`py-s-d-TDGL <https://github.com/kodalinikhil/py-s-d-tdgl>`_ is an
+experimental Python framework for two-dimensional Ginzburg--Landau simulations
+of thin-film superconductors. It extends pyTDGL's geometry, finite-volume,
+transport, screening, post-processing, and visualization stack to four
+order-parameter models:
 
+* :class:`tdgl.SingleBandModel` for standard Kramer--Watts--Tobin TDGL;
+* :class:`tdgl.SPlusDModel` for mixed s+d superconductivity;
+* :class:`tdgl.DPlusDPrimeModel` for chiral d+d' states; and
+* :class:`tdgl.SPlusSModel` for isotropic s+s and s+is systems.
 
-`pyTDGL <https://github.com/loganbvh/py-tdgl>`_ is a Python package that solves a generalized time-dependent Ginzburg-Landau (TDGL)
-model in two dimensions, enabling simulations of vortex and phase dynamics in thin film superconducting devices of arbitrary
-geometry. The package provides a convenient interface for defining complex `device geometries <api/device.rst>`_ and generating
-the corresponding `finite-element <api/finite-volume.rst>`_ data structures. ``pyTDGL`` also includes many methods for
-:ref:`post-processing <api/solution:post-processing>` and :ref:`visualizing <api/visualization:Visualization>`
-spatially- and temporally-resolved simulation results.
+Two backends cover different physical domains. :func:`tdgl.solve` evolves a
+finite :class:`tdgl.Device` of arbitrary shape on an unstructured triangular
+mesh, with holes, terminals, probes, disorder, and applied drives.
+:func:`tdgl.solve_magnetic_periodic` evolves a rectangular vortex-cell torus
+on a structured grid, with magnetic translations and an exactly fixed integer
+flux sector. See :doc:`framework` for a capability map and :doc:`models` for
+the model conventions and limitations.
 
-To get started using ``pyTDGL`` see `Installation <installation.rst>`_ and `Quickstart <notebooks/quickstart.ipynb>`_.
-To learn more about the physics and numerics, see `Theoretical Background <background.rst>`_.
-
-Click the badge below to try ``pyTDGL`` interactively online via `Google Colab <https://colab.research.google.com/>`_:
-
-.. image:: https://colab.research.google.com/assets/colab-badge.svg
- :target: https://colab.research.google.com/github/loganbvh/py-tdgl/blob/main/docs/notebooks/quickstart.ipynb
+Start with :doc:`installation`, then use the :doc:`single-band quickstart
+<notebooks/quickstart>` or the examples in :doc:`models` and
+:doc:`magnetic_periodic`. The :doc:`background` chapter describes the
+inherited single-band formulation and shared finite-volume numerics.
 
 .. tip::
 
-   ``pyTDGL`` is described in detail in the following paper:
+   The original pyTDGL finite-device and single-band implementation is
+   described in:
 
      pyTDGL: Time-dependent Ginzburg-Landau in Python,
      Computer Physics Communications **291**, 108799 (2023),
@@ -60,10 +53,12 @@ Click the badge below to try ``pyTDGL`` interactively online via `Google Colab <
    The accepted version of the paper can also be found on arXiv: `arXiv:2302.03812 <https://doi.org/10.48550/arXiv.2302.03812>`_.
 
 
-Acknowledgements
-----------------
+Attribution and citation
+------------------------
 
-If you use ``pyTDGL`` in your research, please cite the paper linked above.
+If you use this framework in research, cite the original pyTDGL paper for the
+inherited numerical framework and the relevant source listed in :doc:`models`
+for the selected extended model.
 
 .. code-block::
 
@@ -82,26 +77,19 @@ If you use ``pyTDGL`` in your research, please cite the paper linked above.
        doi      = "10.1016/j.cpc.2023.108799"
    }
 
-Parts of this package have been adapted from `SuperDetectorPy <https://github.com/afsa/super-detector-py>`_,
-a GitHub repo authored by `Mattias Jönsson <https://github.com/afsa>`_. Both ``SuperDetectorPy`` and ``pyTDGL``
-are released under the open-source MIT License. If you use either package in an academic publication or similar,
-please consider citing the following:
-
-- Mattias Jönsson, Theory for superconducting few-photon detectors (Doctoral dissertation),
-  KTH Royal Institute of Technology (2022) (`Link <http://urn.kb.se/resolve?urn=urn:nbn:se:kth:diva-312132>`_).
-- Mattias Jönsson, Robert Vedin, Samuel Gyger, James A. Sutton, Stephan Steinhauer, Val Zwiller, Mats Wallin, Jack Lidmar,
-  Current crowding in nanoscale superconductors within the Ginzburg-Landau model, Phys. Rev. Applied 17, 064046 (2022)
-  (`Link <https://journals.aps.org/prapplied/abstract/10.1103/PhysRevApplied.17.064046>`_).
-
-The ``pyTDGL`` Python API is adapted from `SuperScreen <https://superscreen.readthedocs.io/en/latest/>`_,
-(`GitHub repo <hub.com/loganbvh/superscreen>`_, `journal article <https://doi.org/10.1016/j.cpc.2022.108464>`_,
-`arXiv preprint <https://arxiv.org/abs/2203.13388>`_), which solves the London equation in two dimensions.
+The inherited pyTDGL implementation also adapts work from
+`SuperDetectorPy <https://github.com/afsa/super-detector-py>`_ and
+`SuperScreen <https://superscreen.readthedocs.io/en/latest/>`_. See the
+:doc:`background` and :doc:`about/references` pages for the underlying
+numerical references.
 
 .. toctree::
    :maxdepth: 2
    :caption: Getting Started
 
    installation.rst
+   framework.rst
+   models.rst
    notebooks/quickstart.ipynb
    background.rst
    magnetic_periodic.rst
@@ -112,6 +100,8 @@ The ``pyTDGL`` Python API is adapted from `SuperScreen <https://superscreen.read
 
    notebooks/screening.ipynb
    notebooks/polygons.ipynb
+   notebooks/mesh.ipynb
+   notebooks/py-mesh.ipynb
    notebooks/logo.ipynb
 
 
@@ -122,17 +112,18 @@ The ``pyTDGL`` Python API is adapted from `SuperScreen <https://superscreen.read
    api/device.rst
    api/solver.rst
    api/solution.rst
+   api/magnetic-periodic.rst
    api/finite-volume.rst
    api/visualization.rst
 
 .. toctree::
    :maxdepth: 2
-   :caption: About pyTDGL
+   :caption: About py-s-d-TDGL
 
    about/changelog.rst
    about/contributing.rst
    about/license.rst
-   .. about/references.rst
+   about/references.rst
 
 .. Indices and tables
 .. ==================

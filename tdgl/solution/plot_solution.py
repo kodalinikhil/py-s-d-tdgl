@@ -1,3 +1,4 @@
+import inspect
 from typing import Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 import matplotlib as mpl
@@ -708,12 +709,14 @@ def plot_current_through_paths(
 
 def _patch_docstring(func):
     other_func = getattr(Solution, func.__name__)
+    source_doc = inspect.cleandoc(func.__doc__ or "")
+    source_lines = [
+        line
+        for line in source_doc.splitlines()
+        if not line.lstrip().startswith("solution:")
+    ]
     other_func.__doc__ = (
-        other_func.__doc__
-        + "\n\n"
-        + "\n".join(
-            [line for line in func.__doc__.split("\n    ") if "solution:" not in line]
-        )
+        inspect.cleandoc(other_func.__doc__ or "") + "\n\n" + "\n".join(source_lines)
     )
     annotations = func.__annotations__.copy()
     _ = annotations.pop("solution", None)

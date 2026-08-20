@@ -2,11 +2,15 @@
 Change Log
 **********
 
-View release history on `GitHub <https://github.com/loganbvh/py-tdgl/releases>`_, `PyPI <https://pypi.org/project/tdgl/#history>`_ or `Zenodo <https://doi.org/10.5281/zenodo.7613568>`_.
+View this fork's release history on
+`GitHub <https://github.com/kodalinikhil/py-s-d-tdgl/releases>`_. The upstream
+`pyTDGL releases <https://github.com/loganbvh/py-tdgl/releases>`_ describe the
+single-band base from which the project was forked, not changes to this
+framework.
 
 .. note::
 
-    ``pyTDGL`` uses `semantic versioning <https://semver.org/>`_, with version numbers specified as
+    ``py-s-d-TDGL`` uses `semantic versioning <https://semver.org/>`_, with version numbers specified as
     ``MAJOR.MINOR.PATCH``. In particular, note that:
 
     - Major version zero (0.y.z) is for initial development. Anything MAY change at any time.
